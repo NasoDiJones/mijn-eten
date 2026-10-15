@@ -1,0 +1,70 @@
+<!DOCTYPE html>
+<html lang="nl">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="default">
+  <meta name="apple-mobile-web-app-title" content="Mijn Eten">
+  <meta name="theme-color" content="#f2f4f1">
+  <meta name="description" content="Houd je eten, calorieën, macro's, water en gewicht bij.">
+  <title>Mijn Eten</title>
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="icon" type="image/png" sizes="192x192" href="icons/icon-192.png">
+  <link rel="apple-touch-icon" sizes="180x180" href="icons/apple-touch-icon.png">
+  <script>
+    // Thema zo vroeg mogelijk zetten (geen witte flits in donkere modus)
+    (function () {
+      var t = 'auto'; try { t = localStorage.getItem('mijnEten.theme') || 'auto'; } catch (e) {}
+      var dark = t === 'dark' || (t !== 'light' && window.matchMedia && matchMedia('(prefers-color-scheme: dark)').matches);
+      document.documentElement.setAttribute('data-theme', dark ? 'dark' : 'light');
+      var m = document.querySelector('meta[name=theme-color]'); if (m) m.setAttribute('content', dark ? '#0d1110' : '#f2f4f1');
+    })();
+  </script>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div id="app">
+    <!-- Welkom / inloggen (eerste keer) -->
+    <section id="view-welcome" class="view hidden" aria-label="Welkom">
+      <div class="welcome">
+        <div class="welcome-logo" aria-hidden="true">🥗</div>
+        <h1>Mijn Eten</h1>
+        <p class="muted">Houd bij wat je eet, je calorieën, eiwitten, koolhydraten, vetten, water en gewicht.</p>
+        <button class="btn primary block" data-action="open-auth">Inloggen of account maken</button>
+        <button class="btn ghost block" data-action="start-local">Eerst zonder account</button>
+        <p class="tiny muted">Met een account worden je gegevens veilig bewaard en gesynchroniseerd. Iedereen heeft een eigen account en eigen gegevens.</p>
+      </div>
+    </section>
+
+    <!-- Onboarding -->
+    <section id="view-onboarding" class="view hidden" aria-label="Profiel instellen"></section>
+
+    <!-- Dagboek -->
+    <section id="view-diary" class="view hidden" aria-label="Dagboek"></section>
+
+    <!-- Voortgang -->
+    <section id="view-progress" class="view hidden" aria-label="Voortgang"></section>
+
+    <!-- Profiel -->
+    <section id="view-profile" class="view hidden" aria-label="Profiel"></section>
+  </div>
+
+  <nav id="tabbar" class="tabbar hidden" aria-label="Navigatie">
+    <button data-tab="diary" class="tab"><span class="tab-ico">📖</span><span>Dagboek</span></button>
+    <button data-tab="progress" class="tab"><span class="tab-ico">📈</span><span>Voortgang</span></button>
+    <button data-tab="profile" class="tab"><span class="tab-ico">👤</span><span>Profiel</span></button>
+  </nav>
+
+  <div id="backdrop" class="backdrop" data-action="close-sheet"></div>
+  <div id="sheet" class="sheet" role="dialog" aria-modal="true"><div class="sheet-inner" id="sheet-inner"></div></div>
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+  <input type="file" id="photo-input" accept="image/*" capture="environment" class="hidden">
+  <input type="file" id="barcode-photo-input" accept="image/*" capture="environment" class="hidden">
+
+  <script src="vendor/supabase.js"></script>
+  <script src="app.js"></script>
+  <script src="sync.js"></script>
+</body>
+</html>
