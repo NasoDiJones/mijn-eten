@@ -2,7 +2,7 @@
 // Vanilla JS PWA. Data staat lokaal (localStorage) en wordt via sync.js met Supabase gesynchroniseerd.
 (function () {
   'use strict';
-  var VERSION = 'v7';
+  var VERSION = 'v8';
   var DATA_KEY = 'mijnEten.data', PENDING_KEY = 'mijnEten.pending', THEME_KEY = 'mijnEten.theme', UI_KEY = 'mijnEten.ui';
   var TABLES = { eten_profiles: 'profiles', eten_diary: 'entries', eten_foods: 'foods', eten_water: 'water', eten_weights: 'weights' };
   var MEALS = [
@@ -536,9 +536,10 @@
       '<li>Open Scriptable, tik rechtsboven op <b>+</b>, houd je vinger in het lege veld en kies <b>Plak</b>. Tik bovenaan op de naam, noem het <b>Mijn Eten</b> en tik op <b>Gereed</b>.</li>' +
       '<li>Tik één keer op het script en log in met je Mijn Eten-e-mail en wachtwoord (je wachtwoord wordt niet bewaard).</li>' +
       '<li>Houd je beginscherm ingedrukt → <b>Wijzig</b> → <b>Voeg widget toe</b> → <b>Scriptable</b> → kies klein of middel → <b>Voeg widget toe</b>.</li>' +
-      '<li>Houd de widget ingedrukt → <b>Wijzig widget</b> → bij <b>Script</b> kies je <b>Mijn Eten</b>. "Bij interactie" mag blijven staan.</li></ol>' +
+      '<li>Houd de widget ingedrukt → <b>Wijzig widget</b> → bij <b>Script</b> kies je <b>Mijn Eten</b>. "Bij interactie" en "Parameter" mag je laten zoals ze zijn.</li></ol>' +
       '<div class="row mt"><button class="btn primary sm grow" data-action="widget-copy">Script kopiëren</button><a class="btn sm grow" id="widget-open" href="' + WIDGET_PATH + '" target="_blank" rel="noopener">Script bekijken</a></div>' +
-      '<p class="tiny muted" id="widget-msg" style="margin:8px 0 0">Tikken op de widget opent Mijn Eten in Safari (iPhone laat een widget niet de beginscherm-app openen). Log daar één keer in. <b>⚡ Snel kcal</b> op de middelgrote widget voegt calorieën toe zonder de app te openen.</p>';
+      '<p class="tiny muted" id="widget-msg" style="margin:8px 0 0">Tik je op de widget, dan opent Scriptable heel even en worden je cijfers opgehaald; veeg omhoog om terug te gaan. Er gaat nooit Safari open. Mijn Eten zelf open je met het gewone app-icoon. Met <b>⚡ Snel kcal toevoegen</b> op de middelgrote widget voeg je calorieën toe zonder de app te openen.</p>' +
+      '<p class="tiny muted" style="margin:6px 0 0"><b>Nieuwe versie van het script?</b> Open het script in Scriptable, houd je vinger in de tekst → <b>Alles selecteren</b> → <b>Plak</b> (na Script kopiëren) → <b>Gereed</b>.</p>';
   }
   function copyText(text) {
     if (navigator.clipboard && navigator.clipboard.writeText) return navigator.clipboard.writeText(text);
