@@ -2,7 +2,7 @@
 // Vanilla JS PWA. Data staat lokaal (localStorage) en wordt via sync.js met Supabase gesynchroniseerd.
 (function () {
   'use strict';
-  var VERSION = 'v1';
+  var VERSION = 'v2';
   var DATA_KEY = 'mijnEten.data', PENDING_KEY = 'mijnEten.pending', THEME_KEY = 'mijnEten.theme', UI_KEY = 'mijnEten.ui';
   var TABLES = { eten_profiles: 'profiles', eten_diary: 'entries', eten_foods: 'foods', eten_water: 'water', eten_weights: 'weights' };
   var MEALS = [
@@ -472,9 +472,11 @@
       '<p class="tiny muted">Automatisch volgt de instelling van je iPhone.</p></div>';
     html += '<div class="card"><div class="card-title"><h3>📷 Foto herkennen</h3><span class="flag">binnenkort</span></div><p class="small muted" style="margin:0">Een foto van je bord maken en de app laten herkennen wat erop ligt, komt later. Daarvoor is een AI-dienst nodig die een paar cent per foto kost.</p></div>';
     html += '<div class="card"><div class="card-title"><h3>Gegevens</h3></div><button class="btn block" data-action="redo-onboarding">Doel opnieuw berekenen (stappen)</button><button class="btn block" data-action="export">Exporteer mijn gegevens (JSON)</button></div>';
+    if (loggedIn() && window.meSync && window.meSync.backupsHtml) html += '<div class="card" id="backups-card">' + window.meSync.backupsHtml() + '</div>';
     html += '<div class="version">Mijn Eten ' + VERSION + ' · voedingsdata: Open Food Facts (ODbL)</div>';
     $('view-profile').innerHTML = html;
     if (window.meSync && window.meSync.paintStatus) window.meSync.paintStatus();
+    if (window.meSync && window.meSync.refreshBackups && loggedIn()) window.meSync.refreshBackups();
   }
   function targetInput(k, label, unit, t, m) {
     return '<label class="field"><span>' + label + '</span><div class="unit-input"><input data-target="' + k + '" inputmode="numeric" value="' + (m[k] > 0 ? m[k] : '') + '" placeholder="' + fmt(t[k]) + '"><em>' + unit + '</em></div></label>';
