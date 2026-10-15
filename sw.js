@@ -2,7 +2,7 @@
 // - Netwerk eerst (max ~3 s) voor pagina en app-bestanden: updates direct zichtbaar als je online bent.
 // - Cache eerst voor iconen en de (grote) barcode-bibliotheek.
 // - Offline: alles komt uit de cache. Externe verzoeken (Supabase, Open Food Facts) worden nooit gecachet.
-const CACHE = 'mijn-eten-v2';
+const CACHE = 'mijn-eten-v3';
 const PREFIX = 'mijn-eten-';
 const NETWORK_TIMEOUT_MS = 3000;
 const CORE = ['./', './app.js', './sync.js', './styles.css', './manifest.webmanifest', './vendor/supabase.js'];

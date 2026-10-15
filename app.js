@@ -2,7 +2,7 @@
 // Vanilla JS PWA. Data staat lokaal (localStorage) en wordt via sync.js met Supabase gesynchroniseerd.
 (function () {
   'use strict';
-  var VERSION = 'v2';
+  var VERSION = 'v3';
   var DATA_KEY = 'mijnEten.data', PENDING_KEY = 'mijnEten.pending', THEME_KEY = 'mijnEten.theme', UI_KEY = 'mijnEten.ui';
   var TABLES = { eten_profiles: 'profiles', eten_diary: 'entries', eten_foods: 'foods', eten_water: 'water', eten_weights: 'weights' };
   var MEALS = [
@@ -505,7 +505,7 @@
   }
   function closeSheet() {
     if (sheetCtx && sheetCtx.onClose) { try { sheetCtx.onClose(); } catch (e) {} }
-    stopScan();
+    stopScan(); abortSearch();
     sheetCtx = null;
     $('sheet').classList.remove('open'); $('backdrop').classList.remove('open');
     if (document.activeElement && document.activeElement.blur) document.activeElement.blur();
@@ -554,12 +554,38 @@
 
   // ---------- Open Food Facts ----------
   var OFF_FIELDS = 'code,product_name,product_name_nl,generic_name_nl,brands,nutriments,serving_size,serving_quantity,image_front_small_url,image_small_url,countries_tags,quantity';
-  function fetchJson(url, ms) {
-    var ctl = window.AbortController ? new AbortController() : null;
-    var to = setTimeout(function () { if (ctl) ctl.abort(); }, ms || 12000);
-    return fetch(url, ctl ? { signal: ctl.signal } : {}).then(function (r) {
-      clearTimeout(to); if (!r.ok) throw new Error('HTTP ' + r.status); return r.json();
-    }, function (e) { clearTimeout(to); throw e; });
+  // Fout met soort: 'timeout' | 'http' (status) | 'network' (o.a. CORS bij een 503 van OFF) | 'abort' | 'noproxy' | 'proxy' | 'ratelimit'
+  function offErr(kind, status, msg) { var e = new Error(msg || (status ? 'HTTP ' + status : kind)); e.kind = kind; e.status = status || 0; return e; }
+  // Voert fn(signal) uit met een eigen time-out; een extern signaal (nieuwe zoekopdracht / sheet dicht) breekt ook af.
+  function withTimeout(fn, ms, outer) {
+    var ctl = window.AbortController ? new AbortController() : null, timedOut = false;
+    if (outer && outer.aborted) return Promise.reject(offErr('abort'));
+    function onOuter() { if (ctl) ctl.abort(); }
+    if (outer) outer.addEventListener('abort', onOuter);
+    var to = setTimeout(function () { timedOut = true; if (ctl) ctl.abort(); }, ms || 12000);
+    function done() { clearTimeout(to); if (outer) outer.removeEventListener('abort', onOuter); }
+    return Promise.resolve().then(function () { return fn(ctl ? ctl.signal : undefined); }).then(function (v) { done(); return v; }, function (e) {
+      done();
+      if (outer && outer.aborted) throw offErr('abort');
+      if (timedOut) throw offErr('timeout');
+      if (e && e.kind) throw e;
+      throw offErr('network', 0, e && e.message);
+    });
+  }
+  function fetchJson(url, ms, outer) {
+    return withTimeout(function (signal) {
+      return fetch(url, signal ? { signal: signal } : {}).then(function (r) {
+        if (!r.ok) throw offErr('http', r.status);
+        return r.json().catch(function () { throw offErr('http', r.status, 'Geen JSON'); });
+      });
+    }, ms, outer);
+  }
+  function sleep(ms, outer) {
+    return new Promise(function (res, rej) {
+      var t = setTimeout(function () { if (outer) outer.removeEventListener('abort', ab); res(); }, ms);
+      function ab() { clearTimeout(t); rej(offErr('abort')); }
+      if (outer) { if (outer.aborted) return ab(); outer.addEventListener('abort', ab); }
+    });
   }
   function offToFood(p) {
     if (!p) return null;
@@ -587,13 +613,90 @@
     out.sort(function (a, b) { return ((b.local ? 2 : 0) + (b.be ? 1 : 0)) - ((a.local ? 2 : 0) + (a.be ? 1 : 0)) || a._i - b._i; });
     return out;
   }
-  function offSearch(q) {
-    var enc = encodeURIComponent(q);
-    var cgi = 'https://world.openfoodfacts.org/cgi/search.pl?search_terms=' + enc + '&search_simple=1&action=process&json=1&page_size=40&lc=nl&fields=' + OFF_FIELDS;
-    var sal = 'https://search.openfoodfacts.org/search?q=' + enc + '&page_size=40&langs=nl&fields=' + OFF_FIELDS;
-    return fetchJson(cgi, 12000).then(function (d) { return rankOff(d.products || []); })
-      .catch(function () { return fetchJson(sal, 10000).then(function (d) { return rankOff(d.hits || []); }); })
-      .catch(function () { return new Promise(function (r) { setTimeout(r, 1800); }).then(function () { return fetchJson(cgi, 12000); }).then(function (d) { return rankOff(d.products || []); }); });
+  // --- Zoeken: cache, rate-limit, Supabase-proxy (search-a-licious) en cgi/search.pl met één herkansing ---
+  var OFF_CFG = { cgiTimeout: 15000, proxyTimeout: 12000, retryDelay: 2500, cacheTtl: 12 * 3600 * 1000, cacheMax: 25, rateMax: 8, rateWindow: 60000, proxyMissingMs: 30 * 60 * 1000, probeTimeout: 5000 };
+  var OFF_CACHE_KEY = 'mijnEten.offCache', OFF_RATE_KEY = 'mijnEten.offRate', OFF_PROXY_KEY = 'mijnEten.offProxyMissing';
+  var offMem = {};
+  function offKey(q) { return String(q || '').toLowerCase().replace(/\s+/g, ' ').trim(); }
+  function lsGet(k, def) { try { var v = JSON.parse(localStorage.getItem(k)); return v == null ? def : v; } catch (e) { return def; } }
+  function lsSet(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch (e) {} }
+  function offCacheGet(q) {
+    var k = offKey(q), e = offMem[k];
+    if (!e) e = lsGet(OFF_CACHE_KEY, {})[k];
+    if (e && Date.now() - e.t < OFF_CFG.cacheTtl && Array.isArray(e.r)) { offMem[k] = e; return e.r.map(function (f) { return Object.assign({}, f); }); }
+    return null;
+  }
+  function offCachePut(q, r) {
+    var k = offKey(q), e = { t: Date.now(), r: r }; offMem[k] = e;
+    var all = lsGet(OFF_CACHE_KEY, {}); all[k] = e;
+    var keys = Object.keys(all).filter(function (x) { return all[x] && Date.now() - all[x].t < OFF_CFG.cacheTtl; }).sort(function (a, b) { return all[b].t - all[a].t; }).slice(0, OFF_CFG.cacheMax);
+    var keep = {}; keys.forEach(function (x) { keep[x] = all[x]; }); lsSet(OFF_CACHE_KEY, keep);
+  }
+  // OFF staat ±10 zoekopdrachten per minuut per IP toe; wij blijven daar ruim onder.
+  function cgiRecent() { var now = Date.now(); return lsGet(OFF_RATE_KEY, []).filter(function (t) { return now - t < OFF_CFG.rateWindow; }); }
+  function cgiWaitMs() { var r = cgiRecent(); return r.length < OFF_CFG.rateMax ? 0 : Math.max(1000, OFF_CFG.rateWindow - (Date.now() - Math.min.apply(null, r))); }
+  function cgiNote() { var r = cgiRecent(); r.push(Date.now()); lsSet(OFF_RATE_KEY, r); }
+  function proxyUsable() {
+    var s = window.meSync;
+    if (!s || typeof s.offSearch !== 'function' || !s.user || !s.user()) return false;
+    return Date.now() - (+lsGet(OFF_PROXY_KEY, 0) || 0) > OFF_CFG.proxyMissingMs;
+  }
+  function viaProxy(q, outer) {
+    return withTimeout(function (signal) { return window.meSync.offSearch(q, signal); }, OFF_CFG.proxyTimeout, outer)
+      .then(function (d) { if (!d || !Array.isArray(d.hits)) throw offErr('proxy', 0, 'Leeg antwoord'); return d.hits; });
+  }
+  function viaCgi(q, outer) {
+    var url = 'https://world.openfoodfacts.org/cgi/search.pl?search_terms=' + encodeURIComponent(q) + '&search_simple=1&action=process&json=1&page_size=30&lc=nl&fields=' + OFF_FIELDS;
+    cgiNote();
+    return fetchJson(url, OFF_CFG.cgiTimeout, outer).then(function (d) { return d.products || []; });
+  }
+  // Bereikbaarheidstest: no-cors lukt bij elke HTTP-status (ook 503), faalt alleen zonder verbinding.
+  function offProbe() {
+    if (navigator.onLine === false) return Promise.resolve(false);
+    return withTimeout(function (signal) { return fetch('https://world.openfoodfacts.org/favicon.ico?p=' + Date.now(), { mode: 'no-cors', cache: 'no-store', signal: signal }); }, OFF_CFG.probeTimeout)
+      .then(function () { return true; }, function () { return false; });
+  }
+  function offSearch(q, outer, onStep) {
+    var cached = offCacheGet(q);
+    if (cached) return Promise.resolve(cached);
+    var plan = proxyUsable() ? ['proxy', 'cgi'] : ['cgi', 'cgi'];   // max. 2 echte pogingen
+    var errors = [], tries = 0;
+    function finish() {
+      var e;
+      if (navigator.onLine === false) return Promise.reject(offErr('offline'));
+      var rl = errors.filter(function (x) { return x.kind === 'ratelimit'; })[0];
+      if (rl && errors.every(function (x) { return x.kind === 'ratelimit' || x.kind === 'noproxy'; })) return Promise.reject(rl);
+      var allNet = errors.length && errors.every(function (x) { return x.kind === 'network' || x.kind === 'noproxy' || x.kind === 'ratelimit'; });
+      return (allNet ? offProbe() : Promise.resolve(true)).then(function (online) {
+        e = offErr(online ? (errors.some(function (x) { return x.status === 429; }) ? 'ratelimit' : 'busy') : 'offline');
+        if (e.kind === 'ratelimit') e.wait = cgiWaitMs() || 30000;
+        e.errors = errors; throw e;
+      });
+    }
+    function step(i) {
+      if (i >= plan.length) return finish();
+      var src = plan[i], p;
+      if (src === 'proxy') p = viaProxy(q, outer);
+      else {
+        var wait = cgiWaitMs();
+        if (wait > 0) { var rl = offErr('ratelimit'); rl.wait = wait; errors.push(rl); return step(i + 1); }
+        p = (i > 0 && plan[i - 1] === 'cgi' ? sleep(OFF_CFG.retryDelay, outer) : Promise.resolve()).then(function () { return viaCgi(q, outer); });
+      }
+      if (tries > 0 && onStep) onStep(tries, src);
+      tries++;
+      return p.then(function (list) { var r = rankOff(list); offCachePut(q, r); return r; }, function (e) {
+        if (e.kind === 'abort' || (outer && outer.aborted)) throw offErr('abort');
+        errors.push(e);
+        if (e.kind === 'noproxy') { lsSet(OFF_PROXY_KEY, Date.now()); tries--; if (plan.length < 3) plan.push('cgi'); }
+        return step(i + 1);
+      });
+    }
+    return step(0);
+  }
+  function offMessage(e) {
+    if (e.kind === 'offline') return 'Geen internetverbinding. Je eigen en recente producten werken wel, en je kunt een product zelf aanmaken.';
+    if (e.kind === 'ratelimit') { var s = Math.max(5, Math.ceil((e.wait || 30000) / 1000)); return 'Je hebt net vaak achter elkaar gezocht. Open Food Facts staat maar een paar zoekopdrachten per minuut toe. Probeer het over ' + s + ' seconden opnieuw.'; }
+    return 'Open Food Facts is nu erg druk en gaf geen antwoord (dat ligt niet aan jou of de app). Probeer het over een halve minuut opnieuw, of maak het product zelf aan.';
   }
   function offBarcode(code) {
     var variants = barcodeVariants(code), i = 0;
@@ -606,7 +709,7 @@
     }
     return next();
   }
-  window.__meOff = { offToFood: offToFood, rankOff: rankOff };
+  window.__meOff = { offToFood: offToFood, rankOff: rankOff, offSearch: offSearch, offMessage: offMessage, cfg: OFF_CFG, cacheGet: offCacheGet, cgiWaitMs: cgiWaitMs };
 
   // ---------- Toevoegen ----------
   function openAdd(meal) {
@@ -620,7 +723,7 @@
       '<form class="searchbar" data-form="search" autocomplete="off"><input id="add-q" type="search" enterkeyhint="search" placeholder="Zoek product, bijv. yoghurt" value="' + esc(c.q) + '"><button class="btn primary" type="submit">Zoek</button></form>' +
       '<div class="quick-actions">' +
       '<button class="qa" data-action="scan"><span>▥</span><span>Barcode</span></button>' +
-      '<button class="qa" data-action="manual"><span>✏️</span><span>Zelf invoeren</span></button>' +
+      '<button class="qa" data-action="manual"><span>✏️</span><span>Zelf aanmaken</span></button>' +
       '<button class="qa" data-action="quick"><span>⚡</span><span>Snel kcal</span></button>' +
       '<button class="qa" data-action="photo"><span>📷</span><span>Foto</span></button></div>' +
       '<div id="add-list"></div>';
@@ -639,13 +742,14 @@
     if (q) {
       var loc = localMatches(q);
       if (loc.length) { html += '<h3 class="mt">Mijn producten & recent</h3>'; loc.forEach(function (f) { html += foodRow(f, list.length); list.push(f); }); }
-      if (c.loading) html += '<div class="spinner"></div><div class="center tiny muted">Zoeken in Open Food Facts…</div>';
-      else if (c.error) html += '<div class="empty" id="search-error">' + esc(c.error) + '<br><button class="btn sm mt" data-action="search-go">Opnieuw proberen</button> <button class="btn sm mt" data-action="manual">Zelf invoeren</button></div>';
+      if (c.loading) html += '<div class="spinner"></div><div class="center tiny muted" id="search-step">' + esc(c.step || 'Zoeken in Open Food Facts…') + '</div>';
+      else if (c.error && c.errorKind === 'short') html += '<div class="empty" id="search-error" data-kind="short">' + esc(c.error) + '</div>';
+      else if (c.error) html += '<div class="empty" id="search-error" data-kind="' + esc(c.errorKind || 'busy') + '">' + (c.errorKind === 'offline' ? '📡 ' : '⏳ ') + esc(c.error) + '<br>' + (c.errorKind === 'offline' ? '' : '<button class="btn sm mt" data-action="search-go">Opnieuw proberen</button> ') + '<button class="btn sm mt" data-action="manual">Zelf aanmaken</button></div>';
       else if (c.results && c.resultsFor === q) {
         var have = {}; list.forEach(function (f) { if (f.barcode) have[f.barcode] = 1; });
         var offl = c.results.filter(function (f) { return !have[f.code]; });
         html += '<h3 class="mt">Open Food Facts</h3>';
-        if (!offl.length) html += '<div class="empty">Niets (nieuws) gevonden voor "' + esc(q) + '".<br><button class="btn sm mt" data-action="manual">Zelf invoeren</button></div>';
+        if (!offl.length) html += '<div class="empty">Niets (nieuws) gevonden voor "' + esc(q) + '".<br><button class="btn sm mt" data-action="manual">Zelf aanmaken</button></div>';
         offl.forEach(function (f) { var saved = getLive('foods', 'off-' + f.code); f.favorite = saved ? !!saved.favorite : false; html += foodRow(f, list.length); list.push(f); });
       } else if (!loc.length) html += '<div class="empty">Tik op <b>Zoek</b> om in Open Food Facts te zoeken.</div>';
       else html += '<div class="center mt"><button class="btn sm" data-action="search-go">Zoek ook in Open Food Facts</button></div>';
@@ -656,23 +760,38 @@
       if (tab === 'fav') foods = foods.filter(function (f) { return f.favorite; }).sort(function (a, b) { return a.name.localeCompare(b.name, 'nl'); });
       else if (tab === 'mine') foods = foods.filter(function (f) { return f.source === 'custom'; }).sort(function (a, b) { return a.name.localeCompare(b.name, 'nl'); });
       else foods = foods.filter(function (f) { return f.lastUsed; }).sort(function (a, b) { return a.lastUsed < b.lastUsed ? 1 : -1; }).slice(0, 30);
-      if (!foods.length) html += '<div class="empty">' + ({ recent: 'Nog niets gegeten met de app. Zoek een product of scan een barcode.', fav: 'Nog geen favorieten. Tik op ☆ bij een product.', mine: 'Nog geen eigen producten. Kies "Zelf invoeren".' })[tab === 'fav' || tab === 'mine' ? tab : 'recent'] + '</div>';
+      if (!foods.length) html += '<div class="empty">' + ({ recent: 'Nog niets gegeten met de app. Zoek een product of scan een barcode.', fav: 'Nog geen favorieten. Tik op ☆ bij een product.', mine: 'Nog geen eigen producten. Kies "Zelf aanmaken".' })[tab === 'fav' || tab === 'mine' ? tab : 'recent'] + '</div>';
       foods.forEach(function (f) { html += foodRow(f, list.length); list.push(f); });
     }
     c.list = list; el.innerHTML = html;
   }
+  var searchCtl = null;
+  function abortSearch() { if (searchCtl) { try { searchCtl.abort(); } catch (e) {} searchCtl = null; } }
   function doSearch() {
     var c = sheetCtx; if (!c || c.type !== 'add') return;
     var q = ($('add-q').value || '').trim(); c.q = q; if (!q) { renderAddList(); return; }
-    if (navigator.onLine === false) { c.error = 'Je bent offline. Je kunt wel je eigen en recente producten gebruiken.'; renderAddList(); return; }
-    c.loading = true; c.error = ''; renderAddList();
+    if (c.loading && c.loadingFor === q) return;                       // dubbel tikken: lopende zoekopdracht houden
+    if (c.results && c.resultsFor === q && !c.error) { renderAddList(); return; }
+    abortSearch();
+    c.error = ''; c.errorKind = ''; c.step = '';
+    if (q.length < 2) { c.loading = false; c.error = 'Typ minstens 2 letters om te zoeken.'; c.errorKind = 'short'; renderAddList(); return; }
+    var cached = offCacheGet(q);
+    if (cached) { c.loading = false; c.results = cached; c.resultsFor = q; renderAddList(); return; }
+    if (navigator.onLine === false) { c.loading = false; c.error = offMessage({ kind: 'offline' }); c.errorKind = 'offline'; renderAddList(); return; }
+    var ctl = searchCtl = window.AbortController ? new AbortController() : null;
+    c.loading = true; c.loadingFor = q; renderAddList();
     var token = c.token = {};
-    offSearch(q).then(function (res) {
-      if (sheetCtx !== c || c.token !== token) return;
-      c.loading = false; c.results = res; c.resultsFor = q; renderAddList();
-    }).catch(function () {
-      if (sheetCtx !== c || c.token !== token) return;
-      c.loading = false; c.error = 'Zoeken lukt nu niet (Open Food Facts reageert niet of je zoekt te snel achter elkaar). Probeer het zo opnieuw.'; renderAddList();
+    function stale() { return sheetCtx !== c || c.token !== token; }
+    offSearch(q, ctl ? ctl.signal : undefined, function () {
+      if (stale()) return; c.step = 'Open Food Facts reageert traag, ik probeer het nog een keer…'; renderAddList();
+    }).then(function (res) {
+      if (searchCtl === ctl) searchCtl = null;
+      if (stale()) return;
+      c.loading = false; c.step = ''; c.results = res; c.resultsFor = q; renderAddList();
+    }).catch(function (e) {
+      if (searchCtl === ctl) searchCtl = null;
+      if (stale() || (e && e.kind === 'abort')) return;
+      c.loading = false; c.step = ''; c.error = offMessage(e || {}); c.errorKind = (e && e.kind) || 'busy'; renderAddList();
     });
   }
 
@@ -730,7 +849,7 @@
     toast(wasNew ? 'Toegevoegd aan ' + mealName(meal).toLowerCase() + ' ✓' : 'Opgeslagen ✓');
   }
 
-  // ---------- Zelf invoeren ----------
+  // ---------- Zelf aanmaken ----------
   function backOf() { return sheetCtx && sheetCtx.type === 'add' ? sheetCtx : (sheetCtx && sheetCtx.back) || null; }
   function openManual(prefill) {
     prefill = prefill || {};
@@ -739,7 +858,7 @@
     sheetCtx = { type: 'manual', back: back, food: f, basis: '100', meal: back ? back.meal : defaultMeal() };
     var p = f ? f.per100 : {};
     var v = function (x) { return x != null && x !== '' && isFinite(x) ? String(x).replace('.', ',') : ''; };
-    var html = sheetHead(f ? 'Product bewerken' : 'Zelf invoeren', back ? 'manual-back' : null) +
+    var html = sheetHead(f ? 'Product bewerken' : 'Zelf aanmaken', back ? 'manual-back' : null) +
       (prefill.notFound ? '<div class="note" id="notfound-note" style="margin-top:0;margin-bottom:12px">Barcode <b>' + esc(prefill.barcode) + '</b> staat niet in Open Food Facts. Vul de waarden van het etiket in; daarna herkent de app hem voortaan.</div>' : '') +
       '<label class="field"><span>Naam</span><input id="m-name" value="' + esc(f ? f.name : (prefill.name || '')) + '" placeholder="bijv. Boterham met kaas"></label>' +
       '<div class="grid2"><label class="field"><span>Merk (optioneel)</span><input id="m-brand" value="' + esc(f ? f.brand : '') + '"></label>' +
@@ -1081,7 +1200,7 @@
   });
   document.addEventListener('input', function (ev) {
     var t = ev.target;
-    if (t.id === 'add-q') { if (sheetCtx) { sheetCtx.q = t.value; if (!t.value.trim()) { sheetCtx.results = null; sheetCtx.error = ''; } } renderAddList(); }
+    if (t.id === 'add-q') { if (sheetCtx) { sheetCtx.q = t.value; if (!t.value.trim()) sheetCtx.results = null; if (!sheetCtx.loading) { sheetCtx.error = ''; sheetCtx.errorKind = ''; } } renderAddList(); }
     else if (t.id === 'p-qty') updatePortion();
   });
   document.addEventListener('change', function (ev) {

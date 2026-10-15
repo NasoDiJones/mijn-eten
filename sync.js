@@ -323,6 +323,20 @@
     backupsHtml: backupsHtml,
     refreshBackups: refreshBackups,
     restoreBackup: restoreBackup,
+    // Zoeken in Open Food Facts via Supabase-functie eten_off_search (zie mijn-eten-zoeken.sql).
+    offSearch: function (q, signal) {
+      if (!client || !user) { var e0 = new Error('geen sessie'); e0.kind = 'noproxy'; return Promise.reject(e0); }
+      var b = client.rpc('eten_off_search', { q: q, page_size: 30 });
+      if (signal && typeof b.abortSignal === 'function') b = b.abortSignal(signal);
+      return Promise.resolve(b).then(function (r) {
+        if (r && r.error) {
+          var m = (r.error.code || '') + ' ' + (r.error.message || ''), e = new Error(r.error.message || 'rpc');
+          e.kind = /PGRST202|42883|Could not find the function|42501|JWT|not found/i.test(m) || r.status === 404 || r.status === 401 ? 'noproxy' : 'proxy';
+          e.status = r.status || 0; throw e;
+        }
+        return r ? r.data : null;
+      });
+    },
     openAuth: openAuth,
     logout: logout,
     actions: {
