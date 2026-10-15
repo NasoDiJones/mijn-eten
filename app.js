@@ -2,7 +2,7 @@
 // Vanilla JS PWA. Data staat lokaal (localStorage) en wordt via sync.js met Supabase gesynchroniseerd.
 (function () {
   'use strict';
-  var VERSION = 'v3';
+  var VERSION = 'v4';
   var DATA_KEY = 'mijnEten.data', PENDING_KEY = 'mijnEten.pending', THEME_KEY = 'mijnEten.theme', UI_KEY = 'mijnEten.ui';
   var TABLES = { eten_profiles: 'profiles', eten_diary: 'entries', eten_foods: 'foods', eten_water: 'water', eten_weights: 'weights' };
   var MEALS = [
@@ -603,20 +603,23 @@
       image: p.image_front_small_url || p.image_small_url || '',
       per100: { kcal: r1(kcal), protein: r1(num(n.proteins_100g) || 0), carbs: r1(num(n.carbohydrates_100g) || 0), fat: r1(num(n.fat_100g) || 0) },
       serving: sq > 0 && sq < 2000 ? { grams: sq, label: String(p.serving_size || '').trim() || 'portie' } : null,
-      local: countries.indexOf('en:belgium') >= 0 || countries.indexOf('en:netherlands') >= 0,
-      be: countries.indexOf('en:belgium') >= 0
+      local: countries.indexOf('en:netherlands') >= 0,                                   // in Nederland verkocht
+      be: countries.indexOf('en:belgium') >= 0 && countries.indexOf('en:netherlands') < 0  // alleen België (kan via barcode)
     };
   }
-  function rankOff(list) {
+  // nlOnly: zoekresultaten alleen Nederlandse producten (countries_tags bevat en:netherlands). Barcode blijft onbeperkt.
+  function rankOff(list, nlOnly) {
     var seen = {}, out = [];
-    list.forEach(function (p, i) { var f = offToFood(p); if (f && !seen[f.code]) { seen[f.code] = 1; f._i = i; out.push(f); } });
-    out.sort(function (a, b) { return ((b.local ? 2 : 0) + (b.be ? 1 : 0)) - ((a.local ? 2 : 0) + (a.be ? 1 : 0)) || a._i - b._i; });
+    list.forEach(function (p, i) { var f = offToFood(p); if (f && !seen[f.code] && (!nlOnly || f.local)) { seen[f.code] = 1; f._i = i; out.push(f); } });
+    out.sort(function (a, b) { return (b.local ? 1 : 0) - (a.local ? 1 : 0) || a._i - b._i; });
     return out;
   }
   // --- Zoeken: cache, rate-limit, Supabase-proxy (search-a-licious) en cgi/search.pl met één herkansing ---
   var OFF_CFG = { cgiTimeout: 15000, proxyTimeout: 12000, retryDelay: 2500, cacheTtl: 12 * 3600 * 1000, cacheMax: 25, rateMax: 8, rateWindow: 60000, proxyMissingMs: 30 * 60 * 1000, probeTimeout: 5000 };
-  var OFF_CACHE_KEY = 'mijnEten.offCache', OFF_RATE_KEY = 'mijnEten.offRate', OFF_PROXY_KEY = 'mijnEten.offProxyMissing';
+  var OFF_CACHE_KEY = 'mijnEten.offCacheNL', OFF_RATE_KEY = 'mijnEten.offRate', OFF_PROXY_KEY = 'mijnEten.offProxyMissing';
   var offMem = {};
+  try { localStorage.removeItem('mijnEten.offCache'); } catch (e) {}   // oude cache (v3) bevatte ook niet-NL-producten
+  var OFF_NL_QUERY = 'countries_tags:"en:netherlands" ';   // search-a-licious-filter, vóór de zoekterm (server kapt na 80 tekens af)
   function offKey(q) { return String(q || '').toLowerCase().replace(/\s+/g, ' ').trim(); }
   function lsGet(k, def) { try { var v = JSON.parse(localStorage.getItem(k)); return v == null ? def : v; } catch (e) { return def; } }
   function lsSet(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch (e) {} }
@@ -642,11 +645,11 @@
     return Date.now() - (+lsGet(OFF_PROXY_KEY, 0) || 0) > OFF_CFG.proxyMissingMs;
   }
   function viaProxy(q, outer) {
-    return withTimeout(function (signal) { return window.meSync.offSearch(q, signal); }, OFF_CFG.proxyTimeout, outer)
+    return withTimeout(function (signal) { return window.meSync.offSearch(OFF_NL_QUERY + q, signal); }, OFF_CFG.proxyTimeout, outer)
       .then(function (d) { if (!d || !Array.isArray(d.hits)) throw offErr('proxy', 0, 'Leeg antwoord'); return d.hits; });
   }
   function viaCgi(q, outer) {
-    var url = 'https://world.openfoodfacts.org/cgi/search.pl?search_terms=' + encodeURIComponent(q) + '&search_simple=1&action=process&json=1&page_size=30&lc=nl&fields=' + OFF_FIELDS;
+    var url = 'https://world.openfoodfacts.org/cgi/search.pl?search_terms=' + encodeURIComponent(q) + '&search_simple=1&action=process&json=1&page_size=30&lc=nl&tagtype_0=countries&tag_contains_0=contains&tag_0=en%3Anetherlands&fields=' + OFF_FIELDS;
     cgiNote();
     return fetchJson(url, OFF_CFG.cgiTimeout, outer).then(function (d) { return d.products || []; });
   }
@@ -684,7 +687,7 @@
       }
       if (tries > 0 && onStep) onStep(tries, src);
       tries++;
-      return p.then(function (list) { var r = rankOff(list); offCachePut(q, r); return r; }, function (e) {
+      return p.then(function (list) { var r = rankOff(list, true); offCachePut(q, r); return r; }, function (e) {
         if (e.kind === 'abort' || (outer && outer.aborted)) throw offErr('abort');
         errors.push(e);
         if (e.kind === 'noproxy') { lsSet(OFF_PROXY_KEY, Date.now()); tries--; if (plan.length < 3) plan.push('cgi'); }
@@ -732,7 +735,7 @@
   }
   function foodRow(f, i) {
     var thumb = f.image ? '<img class="thumb" loading="lazy" src="' + esc(f.image) + '" alt="" onerror="this.style.visibility=\'hidden\'">' : '<span class="thumb">' + (f.source === 'custom' ? '✏️' : '🍽️') + '</span>';
-    return '<div class="list-item" data-action="pick" data-i="' + i + '">' + thumb + '<div class="grow"><div class="li-name ellipsis">' + esc(f.name) + (f.favorite ? ' <span style="color:#f59e0b">★</span>' : '') + (f.be ? '<span class="flag">BE</span>' : f.local ? '<span class="flag">NL</span>' : '') + '</div><div class="li-sub ellipsis">' + esc(f.brand || (f.source === 'custom' ? 'Eigen product' : '')) + '</div></div>' +
+    return '<div class="list-item" data-action="pick" data-i="' + i + '">' + thumb + '<div class="grow"><div class="li-name ellipsis">' + esc(f.name) + (f.favorite ? ' <span style="color:#f59e0b">★</span>' : '') + (f.be ? '<span class="flag">BE</span>' : '') + '</div><div class="li-sub ellipsis">' + esc(f.brand || (f.source === 'custom' ? 'Eigen product' : '')) + '</div></div>' +
       '<div class="li-kcal">' + fmt(foodKcal(f)) + ' kcal<small>per 100 g</small></div></div>';
   }
   function renderAddList() {

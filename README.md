@@ -3,7 +3,7 @@
 Persoonlijke voedings- en calorie-app (PWA, Nederlands, iPhone-first). Vanilla JS, geen build-stap.
 
 - **Dagboek**: ontbijt, lunch, diner, tussendoortjes; kcal-ring en balken voor eiwit, koolhydraten en vet; datumnavigatie.
-- **Zoeken** in Open Food Facts (NL/BE-producten eerst), **barcode scannen** (ZXing, lokaal in `vendor/`), **zelf aanmaken** (per 100 g of per portie), **snel kcal**.
+- **Zoeken** in Open Food Facts (alleen Nederlandse producten, `countries_tags` = en:netherlands; barcode zoekt overal), **barcode scannen** (ZXing, lokaal in `vendor/`), **zelf aanmaken** (per 100 g of per portie), **snel kcal**.
 - **Zoeken robuust** (v3): alleen op Zoek-knop (min. 2 letters), resultaten 12 uur gecachet, max. 8 OFF-zoekverzoeken per minuut, 1 herkansing, time-out 15 s, oude zoekopdracht wordt afgebroken. Ingelogd eerst via Supabase-functie `eten_off_search` (search.openfoodfacts.org, snel; geeft geen CORS-header aan browsers), anders/daarna `cgi/search.pl`. Aparte meldingen voor offline / OFF druk / te vaak gezocht.
 - **Recent / favorieten / mijn producten**, **water**, **gewicht** met grafiek, 7-daags gemiddelde en prognose.
 - **Profiel**: BMR (Mifflin-St Jeor), TDEE, doel (afvallen / op gewicht blijven / aankomen) met tempo; alle doelen handmatig aan te passen.
