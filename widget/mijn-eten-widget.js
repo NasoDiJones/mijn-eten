@@ -8,15 +8,14 @@
 // alleen de inlogsessie (verversingstoken) staat in de iPhone-sleutelhanger van Scriptable.
 // Iedereen ziet alleen zijn/haar eigen gegevens (Row Level Security in Supabase).
 //
-// Gebruik:  klein of middel widget. Widget-parameter (optioneel):
-//   webapp  -> tik opent de geïnstalleerde Mijn Eten-app via webapp:// (experimenteel, zie uitleg in de app)
-// Draai het script in Scriptable zelf voor het menu (inloggen, uitloggen/ander account, snel kcal, voorbeeld).
+// Gebruik:  klein of middel widget (geen widget-parameter nodig).
+// Tikken op de widget opent NOOIT Safari of een website: het opent Scriptable even, ververst de cijfers
+// stil (zonder menu) en is klaar. "⚡ Snel kcal" (middel) voegt calorieën toe binnen Scriptable.
+// Draai het script zelf in Scriptable voor het menu (inloggen, uitloggen/ander account, snel kcal, voorbeeld).
 
-const VERSIE = 'widget v1';
+const VERSIE = 'widget v2';
 const SUPABASE_URL = 'https://zsqxzyqpyvnnwigwrsoa.supabase.co';
 const SUPABASE_KEY = 'sb_publishable_WocraeDzyG44zL01tOU02A_DyT1P9n3'; // publieke client-sleutel (anon), geen geheim
-const APP_URL = 'https://nasodijones.github.io/mijn-eten/';
-const WEBAPP_URL = 'webapp://nasodijones.github.io/mijn-eten/';
 const KC_KEY = 'mijnEten.widget.sessie';
 const CACHE_FILE = 'mijn-eten-widget-cache.json';
 const REFRESH_MIN = 15;
@@ -250,11 +249,7 @@ function macroLine(parent, label, val, goal, color) {
   row.addSpacer();
   txt(row, fmt(val) + '/' + fmt(goal) + ' g', 11, val > goal * 1.05 ? C.danger() : C.text(), 'semibold');
 }
-function openUrl(action) {
-  const web = String((typeof args !== 'undefined' && args.widgetParameter) || '').trim().toLowerCase() === 'webapp';
-  if (web) return WEBAPP_URL; // webapp:// negeert het pad; de app opent dan gewoon op het dagboek
-  return APP_URL + (action ? '?actie=' + action : '');
-}
+// Alle tikken blijven binnen Scriptable (scriptable:///run/<naam>?actie=…); nooit een https- of webapp-link.
 function scriptUrl(action) {
   const name = typeof Script !== 'undefined' && Script.name ? Script.name() : 'Mijn Eten';
   return 'scriptable:///run/' + encodeURIComponent(name) + '?actie=' + action;
@@ -268,7 +263,7 @@ function header(w, stale) {
 function buildWidget(d, family, info) {
   const w = new ListWidget();
   w.backgroundColor = C.bg();
-  w.url = openUrl('');
+  w.url = scriptUrl('ververs'); // tik: Scriptable ververst stil, geen menu, geen Safari
   w.refreshAfterDate = new Date(Date.now() + REFRESH_MIN * 60 * 1000);
   const stale = info && info.stale ? info.stale : '';
   if (family === 'accessoryInline') { txt(w, d.over ? fmt(-d.left) + ' kcal te veel' : 'Nog ' + fmt(d.left) + ' kcal', 12, C.text()); return w; }
@@ -305,17 +300,14 @@ function buildWidget(d, family, info) {
   macroLine(col, 'Vet', d.fat, d.tFat, C.fat());
   w.addSpacer(6);
   const btns = w.addStack();
-  const add = btns.addStack(); add.backgroundColor = C.btn(); add.cornerRadius = 9; add.setPadding(4, 10, 4, 10); add.url = openUrl('toevoegen');
-  add.addSpacer(); txt(add, '+ Toevoegen', 12, C.brand(), 'bold'); add.addSpacer();
-  btns.addSpacer(8);
   const q = btns.addStack(); q.backgroundColor = C.btn(); q.cornerRadius = 9; q.setPadding(4, 10, 4, 10); q.url = scriptUrl('snel');
-  q.addSpacer(); txt(q, '⚡ Snel kcal', 12, C.brand(), 'bold'); q.addSpacer();
+  q.addSpacer(); txt(q, '⚡ Snel kcal toevoegen', 12, C.brand(), 'bold'); q.addSpacer();
   return w;
 }
 function messageWidget(title, body, url) {
   const w = new ListWidget();
   w.backgroundColor = C.bg(); w.setPadding(12, 12, 12, 12);
-  w.url = url || APP_URL;
+  w.url = url || scriptUrl('ververs');
   w.refreshAfterDate = new Date(Date.now() + REFRESH_MIN * 60 * 1000);
   txt(w, 'Mijn Eten', 12, C.brand(), 'bold');
   w.addSpacer(6);
@@ -401,7 +393,7 @@ async function menu() {
   a.message = (s && s.user ? 'Ingelogd als ' + s.user.email : 'Niet ingelogd') + '\n' + VERSIE;
   const opts = [];
   if (s) {
-    opts.push(['Voorbeeld klein', 'small'], ['Voorbeeld middel', 'medium'], ['⚡ Snel kcal toevoegen', 'snel'], ['Mijn Eten openen', 'open'], ['Uitloggen / ander account', 'logout']);
+    opts.push(['Voorbeeld klein', 'small'], ['Voorbeeld middel', 'medium'], ['⚡ Snel kcal toevoegen', 'snel'], ['Uitloggen / ander account', 'logout']);
   } else opts.push(['Inloggen', 'login']);
   opts.forEach(o => a.addAction(o[0]));
   a.addCancelAction('Sluiten');
@@ -411,7 +403,6 @@ async function menu() {
   if (act === 'login') { if (await askLogin()) await preview('medium'); }
   else if (act === 'small' || act === 'medium') await preview(act);
   else if (act === 'snel') await quickAdd();
-  else if (act === 'open') Safari.open(APP_URL);
   else if (act === 'logout') {
     const c = new Alert(); c.title = 'Uitloggen?'; c.message = 'De widget toont daarna niets meer tot je opnieuw inlogt. Je gegevens blijven gewoon in je account.';
     c.addDestructiveAction('Uitloggen'); c.addAction('Uitloggen en ander account'); c.addCancelAction('Annuleren');
@@ -434,7 +425,17 @@ async function main() {
     Script.complete();
     return r;
   }
-  const action = (typeof args !== 'undefined' && args.queryParameters && args.queryParameters.actie) || '';
+  let action = (typeof args !== 'undefined' && args.queryParameters && args.queryParameters.actie) || '';
+  // Widget ingesteld op "Bij interactie: Voer script uit" (zonder URL): ook stil verversen
+  if (!action && typeof config !== 'undefined' && config.runsFromHomeScreen) action = 'ververs';
+  if (action === 'ververs') {
+    // Tik op de widget: alleen de cijfers ophalen (cache bijwerken, token verversen), geen menu, geen Safari.
+    // Niet ingelogd/verlopen: dan wél het inlogvenster, anders gebeurt er niets zichtbaars.
+    const r = await widgetFor('medium');
+    if (r.kind === 'nologin' || r.kind === 'auth') { clearSession(); await askLogin(r.kind === 'auth' ? 'Je sessie is verlopen.' : ''); }
+    Script.complete();
+    return r;
+  }
   if (!readSession()) {
     const s = await askLogin();
     if (s && action === 'snel') await quickAdd();
@@ -447,7 +448,7 @@ async function main() {
 
 // Voor tests in Node (Scriptable zelf gebruikt dit niet)
 if (typeof module !== 'undefined' && module && typeof globalThis.__ME_WIDGET_TEST__ !== 'undefined') {
-  module.exports = { calc, targets, sumOf, summarize, latestWeight, defaultMeal, todayKey, fmt, numNl, signIn, refresh, session, loadData, fetchToday, addQuick, widgetFor, buildWidget, logoutLocal, readSession, openUrl, scriptUrl, main, quickAdd, menu, KC_KEY };
+  module.exports = { calc, targets, sumOf, summarize, latestWeight, defaultMeal, todayKey, fmt, numNl, signIn, refresh, session, loadData, fetchToday, addQuick, widgetFor, buildWidget, logoutLocal, readSession, scriptUrl, main, quickAdd, menu, KC_KEY };
 } else {
   await main();
 }
