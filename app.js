@@ -2,7 +2,7 @@
 // Vanilla JS PWA. Data staat lokaal (localStorage) en wordt via sync.js met Supabase gesynchroniseerd.
 (function () {
   'use strict';
-  var VERSION = 'v4';
+  var VERSION = 'v5';
   var DATA_KEY = 'mijnEten.data', PENDING_KEY = 'mijnEten.pending', THEME_KEY = 'mijnEten.theme', UI_KEY = 'mijnEten.ui';
   var TABLES = { eten_profiles: 'profiles', eten_diary: 'entries', eten_foods: 'foods', eten_water: 'water', eten_weights: 'weights' };
   var MEALS = [
@@ -473,7 +473,8 @@
     html += '<div class="card"><div class="card-title"><h3>📷 Foto herkennen</h3><span class="flag">binnenkort</span></div><p class="small muted" style="margin:0">Een foto van je bord maken en de app laten herkennen wat erop ligt, komt later. Daarvoor is een AI-dienst nodig die een paar cent per foto kost.</p></div>';
     html += '<div class="card"><div class="card-title"><h3>Gegevens</h3></div><button class="btn block" data-action="redo-onboarding">Doel opnieuw berekenen (stappen)</button><button class="btn block" data-action="export">Exporteer mijn gegevens (JSON)</button></div>';
     if (loggedIn() && window.meSync && window.meSync.backupsHtml) html += '<div class="card" id="backups-card">' + window.meSync.backupsHtml() + '</div>';
-    html += '<div class="version">Mijn Eten ' + VERSION + ' · voedingsdata: Open Food Facts (ODbL)</div>';
+    html += '<div class="card" id="sources-card"><div class="card-title"><h3>Bronnen</h3></div><p class="small muted" style="margin:0 0 6px">Basisproducten (NEVO): <b>Bron: NEVO-online versie 2025/9.0, RIVM, Bilthoven</b>. De voedingswaarden zijn ongewijzigd overgenomen; portiegroottes bij basisproducten (zoals 1 stuk of 1 snee) zijn schattingen van Mijn Eten en geen NEVO-gegevens. Meest recente versie: <a href="https://www.rivm.nl/nevo" target="_blank" rel="noopener">rivm.nl/nevo</a>.</p><p class="small muted" style="margin:0">Merkproducten: © Open Food Facts-bijdragers (ODbL).</p></div>';
+    html += '<div class="version">Mijn Eten ' + VERSION + ' · voedingsdata: NEVO-online 2025/9.0 (RIVM) en Open Food Facts (ODbL)</div>';
     $('view-profile').innerHTML = html;
     if (window.meSync && window.meSync.paintStatus) window.meSync.paintStatus();
     if (window.meSync && window.meSync.refreshBackups && loggedIn()) window.meSync.refreshBackups();
@@ -536,7 +537,7 @@
   function norm(s) { return String(s || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, ''); }
   function localMatches(q) {
     var words = norm(q).split(/\s+/).filter(Boolean); if (!words.length) return [];
-    return savedFoods().filter(function (f) { var hay = norm(f.name + ' ' + (f.brand || '')); return words.every(function (w) { return hay.indexOf(w) >= 0; }); })
+    return savedFoods().filter(function (f) { var hay = norm(f.name + ' ' + (f.brand || '') + ' ' + (f.syn || '')); return words.every(function (w) { return hay.indexOf(w) >= 0; }); })
       .sort(function (a, b) { return (b.useCount || 0) - (a.useCount || 0); }).slice(0, 15);
   }
   function foodIdOf(f) { return f.id && !/^tmp:/.test(f.id) ? f.id : (f.code ? 'off-' + f.code : null); }
@@ -548,9 +549,82 @@
       per100: f.per100, serving: f.serving || null, favorite: f.favorite != null ? !!f.favorite : !!cur.favorite,
       useCount: (cur.useCount || 0) + (used ? 1 : 0), lastUsed: used ? new Date().toISOString() : (cur.lastUsed || '')
     };
+    if (data.source === 'nevo') { data.syn = f.syn != null ? f.syn : (cur.syn || ''); data.group = f.group || cur.group || ''; data.ml = f.ml != null ? !!f.ml : !!cur.ml; data.servingEst = !!(f.serving && (f.servingEst != null ? f.servingEst : cur.servingEst)); }
     put('eten_foods', id, data);
     return Object.assign({ id: id }, data);
   }
+
+
+  // ---------- NEVO (RIVM) basisproducten: lokaal, offline, direct ----------
+  // Bron: NEVO-online versie 2025/9.0, RIVM, Bilthoven. Waarden ongewijzigd overgenomen (selectie van kolommen).
+  // Portiegroottes ("p" in het bestand) zijn een aanvulling/schatting van Mijn Eten, geen NEVO-gegevens.
+  var NEVO_URL = 'data/nevo.json', NEVO_SRC = 'NEVO-online versie 2025/9.0, RIVM, Bilthoven';
+  var nevo = { status: 'idle', data: null, idx: null, promise: null };
+  var NEVO_ABBR = { z: 'zonder', m: 'met', gem: 'gemiddeld', v: 'van', ed: 'en dergelijke', p: 'per', verz: 'verzadigd', onb: 'onbereid', obv: 'op basis van', vetz: 'vetzuren' };
+  var NEVO_NICHE = ['glutenvrij', 'bakmix', 'baby', 'dreumes', 'peuter', 'zuigeling', 'opvolg', 'moedermelk', 'borstvoeding', 'sondevoeding', 'flesvoeding'];
+  function nvNorm(x) { return norm(x).replace(/[^a-z0-9%]+/g, ' ').trim(); }
+  function nvWords(x) { var out = []; nvNorm(x).split(' ').forEach(function (w) { if (!w) return; var a = NEVO_ABBR[w]; if (a) a.split(' ').forEach(function (y) { out.push(y); }); else out.push(w); }); return out; }
+  function nvStem(t) { var x = t; if (x.length > 4) x = x.replace(/(en|s|e)$/, ''); return x.replace(/([bdfgklmnprst])\1$/, '$1'); }
+  function ensureNevo() {
+    if (nevo.promise) return nevo.promise;
+    nevo.status = 'loading';
+    nevo.promise = fetch(NEVO_URL).then(function (r) { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); }).then(function (d) {
+      nevo.data = d; if (d.bron) NEVO_SRC = d.bron;
+      nevo.idx = d.f.map(function (r) { var nw = nvWords(r[1]), sw = nvWords(r[2]); return { r: r, nw: nw, sw: sw, gw: nvWords(d.groups[r[3]] || ''), all: nw.join(' ') + ' ' + sw.join(' ') }; });
+      nevo.status = 'ready'; if (sheetCtx && sheetCtx.type === 'add') renderAddList();
+      return nevo;
+    }).catch(function (e) { nevo.status = 'error'; nevo.promise = null; if (sheetCtx && sheetCtx.type === 'add') renderAddList(); throw e; });
+    return nevo.promise;
+  }
+  function nvTok(t, nw, sw) {
+    var best = 0, i, w;
+    function up(v) { if (v > best) best = v; }
+    for (i = 0; i < nw.length; i++) { w = nw[i];
+      if (w === t) up(10 + (i === 0 ? 3 : 0));
+      else if (w.indexOf(t) === 0) up((/^(t?jes?|s)$/.test(w.slice(t.length)) ? 6 : 7) + (i === 0 ? 2 : 0) - Math.min(2, (w.length - t.length) / 4));
+      else if (t.length >= 3 && w.length > t.length && w.slice(-t.length) === t) up(i === 0 ? 8 : 5);
+      else if (t.length >= 3 && w.indexOf(t) > 0) up(2); }
+    for (i = 0; i < sw.length; i++) { w = sw[i];
+      if (w === t) up(8);
+      else if (w.indexOf(t) === 0) up(6 - Math.min(2, (w.length - t.length) / 4));
+      else if (t.length >= 3 && w.length > t.length && w.slice(-t.length) === t) up(4);
+      else if (t.length >= 3 && w.indexOf(t) > 0) up(1.5); }
+    return best;
+  }
+  function nevoSearch(q, max) {
+    if (nevo.status !== 'ready') return [];
+    var toks = nvWords(q); if (!toks.length || nvNorm(q).length < 2) return [];
+    var qs = toks.join(' '), res = [];
+    nevo.idx.forEach(function (e) {
+      var total = 0, inName = 0;
+      for (var k = 0; k < toks.length; k++) {
+        var t = toks[k], sc = nvTok(t, e.nw, e.sw), st = nvStem(t);
+        if (st !== t && st.length >= 3) sc = Math.max(sc, nvTok(st, e.nw, e.sw) - 1);
+        if (t.length < 3 && sc < 7) sc = 0;
+        if (!sc) return;
+        total += sc; if (nvTok(t, e.nw, []) >= 5) inName++;
+      }
+      if (inName === toks.length) total += 3;
+      if (toks.some(function (t) { return e.gw.indexOf(t) >= 0 || e.gw.indexOf(nvStem(t)) >= 0; })) total += 2;
+      total -= e.nw.length * 0.35;
+      if (e.nw.indexOf('gemiddeld') >= 0) total += 0.8;
+      if (e.nw.indexOf('gekookt') >= 0 || e.nw.indexOf('bereid') >= 0) total += 0.6;
+      for (var n = 0; n < NEVO_NICHE.length; n++) if (e.all.indexOf(NEVO_NICHE[n]) >= 0 && qs.indexOf(NEVO_NICHE[n]) < 0) { total -= 5; break; }
+      res.push({ e: e, s: total });
+    });
+    res.sort(function (a, b) { return b.s - a.s || a.e.r[1].length - b.e.r[1].length; });
+    return res.slice(0, max || 25).map(function (x) { return nevoToFood(x.e.r); });
+  }
+  function nevoToFood(r) {
+    var d = nevo.data, p = d.p && d.p[String(r[0])];
+    var saved = getLive('foods', 'nevo-' + r[0]);
+    return {
+      id: 'nevo-' + r[0], code: '', barcode: '', name: r[1], brand: '', syn: r[2] || '', group: d.groups[r[3]] || '', source: 'nevo', image: '',
+      per100: { kcal: r[4], protein: r[5] || 0, carbs: r[6] || 0, fat: r[7] || 0 }, fiber: r[8], ml: !!r[9],
+      serving: p ? { grams: p[1], label: p[0] } : null, servingEst: !!p, favorite: saved ? !!saved.favorite : false
+    };
+  }
+  window.__meNevo = { ensure: ensureNevo, search: nevoSearch, state: function () { return nevo; }, src: function () { return NEVO_SRC; } };
 
   // ---------- Open Food Facts ----------
   var OFF_FIELDS = 'code,product_name,product_name_nl,generic_name_nl,brands,nutriments,serving_size,serving_quantity,image_front_small_url,image_small_url,countries_tags,quantity';
@@ -734,9 +808,10 @@
     renderAddList();
   }
   function foodRow(f, i) {
-    var thumb = f.image ? '<img class="thumb" loading="lazy" src="' + esc(f.image) + '" alt="" onerror="this.style.visibility=\'hidden\'">' : '<span class="thumb">' + (f.source === 'custom' ? '✏️' : '🍽️') + '</span>';
-    return '<div class="list-item" data-action="pick" data-i="' + i + '">' + thumb + '<div class="grow"><div class="li-name ellipsis">' + esc(f.name) + (f.favorite ? ' <span style="color:#f59e0b">★</span>' : '') + (f.be ? '<span class="flag">BE</span>' : '') + '</div><div class="li-sub ellipsis">' + esc(f.brand || (f.source === 'custom' ? 'Eigen product' : '')) + '</div></div>' +
-      '<div class="li-kcal">' + fmt(foodKcal(f)) + ' kcal<small>per 100 g</small></div></div>';
+    var thumb = f.image ? '<img class="thumb" loading="lazy" src="' + esc(f.image) + '" alt="" onerror="this.style.visibility=\'hidden\'">' : '<span class="thumb">' + (f.source === 'custom' ? '✏️' : f.source === 'nevo' ? '🥕' : '🍽️') + '</span>';
+    var sub = f.source === 'nevo' ? (f.syn || f.group || 'Basisproduct') : (f.brand || (f.source === 'custom' ? 'Eigen product' : ''));
+    return '<div class="list-item" data-action="pick" data-i="' + i + '">' + thumb + '<div class="grow"><div class="li-name ellipsis">' + esc(f.name) + (f.favorite ? ' <span style="color:#f59e0b">★</span>' : '') + (f.be ? '<span class="flag">BE</span>' : '') + '</div><div class="li-sub ellipsis">' + (f.source === 'nevo' ? '<span class="flag nevo flag-lead">NEVO</span>' : '') + esc(sub) + '</div></div>' +
+      '<div class="li-kcal">' + fmt(foodKcal(f)) + ' kcal<small>per 100 ' + (f.ml ? 'ml' : 'g') + '</small></div></div>';
   }
   function renderAddList() {
     var c = sheetCtx, el = $('add-list'); if (!c || c.type !== 'add' || !el) return;
@@ -745,6 +820,20 @@
     if (q) {
       var loc = localMatches(q);
       if (loc.length) { html += '<h3 class="mt">Mijn producten & recent</h3>'; loc.forEach(function (f) { html += foodRow(f, list.length); list.push(f); }); }
+      var nv = [];
+      if (q.length >= 2) {
+        if (nevo.status === 'idle') ensureNevo().catch(function () {});
+        var haveIds = {}; loc.forEach(function (f) { haveIds[f.id] = 1; });
+        nv = nevoSearch(q, 40).filter(function (f) { return !haveIds[f.id]; });
+        var nvShow = c.nevoAll ? nv : nv.slice(0, 8);
+        if (nevo.status === 'loading') html += '<div class="tiny muted mt" id="nevo-loading">Basisproducten laden…</div>';
+        else if (nv.length) {
+          html += '<h3 class="mt" id="nevo-head">Basisproducten <span class="tiny muted">(NEVO)</span></h3><div id="nevo-list">';
+          nvShow.forEach(function (f) { html += foodRow(f, list.length); list.push(f); });
+          html += '</div>';
+          if (nv.length > nvShow.length) html += '<div class="center"><button class="btn sm ghost" data-action="nevo-more">Meer basisproducten (' + (nv.length - nvShow.length) + ')</button></div>';
+        }
+      }
       if (c.loading) html += '<div class="spinner"></div><div class="center tiny muted" id="search-step">' + esc(c.step || 'Zoeken in Open Food Facts…') + '</div>';
       else if (c.error && c.errorKind === 'short') html += '<div class="empty" id="search-error" data-kind="short">' + esc(c.error) + '</div>';
       else if (c.error) html += '<div class="empty" id="search-error" data-kind="' + esc(c.errorKind || 'busy') + '">' + (c.errorKind === 'offline' ? '📡 ' : '⏳ ') + esc(c.error) + '<br>' + (c.errorKind === 'offline' ? '' : '<button class="btn sm mt" data-action="search-go">Opnieuw proberen</button> ') + '<button class="btn sm mt" data-action="manual">Zelf aanmaken</button></div>';
@@ -754,8 +843,8 @@
         html += '<h3 class="mt">Open Food Facts</h3>';
         if (!offl.length) html += '<div class="empty">Niets (nieuws) gevonden voor "' + esc(q) + '".<br><button class="btn sm mt" data-action="manual">Zelf aanmaken</button></div>';
         offl.forEach(function (f) { var saved = getLive('foods', 'off-' + f.code); f.favorite = saved ? !!saved.favorite : false; html += foodRow(f, list.length); list.push(f); });
-      } else if (!loc.length) html += '<div class="empty">Tik op <b>Zoek</b> om in Open Food Facts te zoeken.</div>';
-      else html += '<div class="center mt"><button class="btn sm" data-action="search-go">Zoek ook in Open Food Facts</button></div>';
+      } else if (!loc.length && !nv.length) html += '<div class="empty">Tik op <b>Zoek</b> om ook in Open Food Facts (merkproducten) te zoeken.</div>';
+      else html += '<div class="center mt"><button class="btn sm" data-action="search-go">Zoek ook merkproducten in Open Food Facts</button></div>';
     } else {
       var tab = c.tab;
       html += '<div class="seg mt mb">' + [['recent', 'Recent'], ['fav', 'Favorieten'], ['mine', 'Mijn producten']].map(function (t) { return '<button data-action="add-tab" data-v="' + t[0] + '" aria-pressed="' + (tab === t[0]) + '">' + t[1] + '</button>'; }).join('') + '</div>';
@@ -773,6 +862,7 @@
   function doSearch() {
     var c = sheetCtx; if (!c || c.type !== 'add') return;
     var q = ($('add-q').value || '').trim(); c.q = q; if (!q) { renderAddList(); return; }
+    if (nevo.status === 'idle') ensureNevo().catch(function () {});
     if (c.loading && c.loadingFor === q) return;                       // dubbel tikken: lopende zoekopdracht houden
     if (c.results && c.resultsFor === q && !c.error) { renderAddList(); return; }
     abortSearch();
@@ -813,16 +903,17 @@
     var c = sheetCtx, f = c.food, fid = foodIdOf(f), saved = fid ? getLive('foods', fid) : null;
     var fav = saved ? !!saved.favorite : !!f.favorite;
     var html = sheetHead(c.entry ? 'Aanpassen' : 'Hoeveelheid', c.back ? 'portion-back' : null);
-    html += '<div class="row">' + (f.image ? '<img class="thumb" src="' + esc(f.image) + '" alt="" onerror="this.style.visibility=\'hidden\'">' : '<span class="thumb">' + (f.source === 'custom' ? '✏️' : '🍽️') + '</span>') +
-      '<div class="grow"><div class="li-name" id="p-name">' + esc(f.name) + '</div><div class="li-sub">' + esc(f.brand || (f.source === 'custom' ? 'Eigen product' : '')) + (f.barcode ? ' · ' + esc(f.barcode) : '') + '</div></div>' +
+    html += '<div class="row">' + (f.image ? '<img class="thumb" src="' + esc(f.image) + '" alt="" onerror="this.style.visibility=\'hidden\'">' : '<span class="thumb">' + (f.source === 'custom' ? '✏️' : f.source === 'nevo' ? '🥕' : '🍽️') + '</span>') +
+      '<div class="grow"><div class="li-name" id="p-name">' + esc(f.name) + (f.source === 'nevo' ? '<span class="flag nevo">NEVO</span>' : '') + '</div><div class="li-sub">' + esc(f.source === 'nevo' ? (f.syn || f.group || 'Basisproduct') : (f.brand || (f.source === 'custom' ? 'Eigen product' : ''))) + (f.barcode ? ' · ' + esc(f.barcode) : '') + '</div></div>' +
       '<button class="star" data-action="fav" aria-pressed="' + fav + '" aria-label="Favoriet">' + (fav ? '★' : '☆') + '</button></div>';
     html += '<div class="nutri-grid" id="p-nutri"></div>';
     html += '<div class="grid2"><label class="field"><span>Hoeveelheid</span><input id="p-qty" inputmode="decimal" value="' + esc(String(r1(c.qty)).replace('.', ',')) + '"></label>' +
-      '<label class="field"><span>Eenheid</span><select id="p-unit"><option value="g"' + (c.unit === 'g' ? ' selected' : '') + '>gram</option>' +
-      (f.serving ? '<option value="serving"' + (c.unit === 'serving' ? ' selected' : '') + '>' + esc(f.serving.label || 'portie') + ' (' + fmt(f.serving.grams) + ' g)</option>' : '') + '</select></label></div>';
+      '<label class="field"><span>Eenheid</span><select id="p-unit"><option value="g"' + (c.unit === 'g' ? ' selected' : '') + '>' + (f.ml ? 'ml' : 'gram') + '</option>' +
+      (f.serving ? '<option value="serving"' + (c.unit === 'serving' ? ' selected' : '') + '>' + esc(f.serving.label || 'portie') + ' (' + fmt(f.serving.grams) + (f.ml ? ' ml' : ' g') + ')</option>' : '') + '</select></label></div>';
     html += '<div class="row wrap" style="gap:6px;margin:-4px 0 12px">' + (c.unit === 'g' ? [50, 100, 150, 200, 250] : [0.5, 1, 1.5, 2, 3]).map(function (v) { return '<button class="btn sm" data-action="p-quick" data-v="' + v + '">' + fmt(v, 1) + (c.unit === 'g' ? ' g' : '×') + '</button>'; }).join('') + '</div>';
     html += '<label class="field"><span>Maaltijd</span><select id="p-meal">' + MEALS.map(function (m) { return '<option value="' + m.id + '"' + (c.meal === m.id ? ' selected' : '') + '>' + m.name + '</option>'; }).join('') + '</select></label>';
-    html += '<div class="tiny muted">Per 100 g: ' + fmt(f.per100.kcal) + ' kcal · eiwit ' + fmt(f.per100.protein, 1) + ' g · koolh. ' + fmt(f.per100.carbs, 1) + ' g · vet ' + fmt(f.per100.fat, 1) + ' g</div>';
+    html += '<div class="tiny muted">Per 100 ' + (f.ml ? 'ml' : 'g') + ': ' + fmt(f.per100.kcal) + ' kcal · eiwit ' + fmt(f.per100.protein, 1) + ' g · koolh. ' + fmt(f.per100.carbs, 1) + ' g · vet ' + fmt(f.per100.fat, 1) + ' g</div>';
+    if (f.source === 'nevo') html += '<div class="tiny muted" id="nevo-src" style="margin-top:4px">Bron: ' + esc(NEVO_SRC) + (f.servingEst ? '. Portiegrootte is een schatting van Mijn Eten (geen NEVO-gegeven).' : '.') + '</div>';
     html += '<button class="btn primary block" data-action="p-save">' + (c.entry ? 'Opslaan' : 'Toevoegen aan ' + esc(mealName(c.meal).toLowerCase())) + '</button>';
     if (c.entry) html += '<button class="btn danger block" data-action="p-delete">Verwijderen</button>';
     if (f.source === 'custom' && saved) html += '<button class="btn ghost block" data-action="edit-food">Product bewerken</button>';
@@ -1139,6 +1230,7 @@
     'add-meal': function (el) { sheetCtx.meal = el.getAttribute('data-v'); document.querySelectorAll('[data-action=add-meal]').forEach(function (b) { b.setAttribute('aria-pressed', b === el ? 'true' : 'false'); }); },
     'add-tab': function (el) { sheetCtx.tab = ui.addTab = el.getAttribute('data-v'); saveUi(); renderAddList(); },
     'search-go': function () { doSearch(); },
+    'nevo-more': function () { if (sheetCtx) { sheetCtx.nevoAll = true; renderAddList(); } },
     'pick': function (el) { var f = sheetCtx.list[+el.getAttribute('data-i')]; if (f) openPortion(f); },
     'portion-back': goBack,
     'p-quick': function (el) { $('p-qty').value = String(el.getAttribute('data-v')).replace('.', ','); updatePortion(); },
@@ -1203,7 +1295,7 @@
   });
   document.addEventListener('input', function (ev) {
     var t = ev.target;
-    if (t.id === 'add-q') { if (sheetCtx) { sheetCtx.q = t.value; if (!t.value.trim()) sheetCtx.results = null; if (!sheetCtx.loading) { sheetCtx.error = ''; sheetCtx.errorKind = ''; } } renderAddList(); }
+    if (t.id === 'add-q') { if (sheetCtx) { sheetCtx.q = t.value; sheetCtx.nevoAll = false; if (!t.value.trim()) sheetCtx.results = null; if (!sheetCtx.loading) { sheetCtx.error = ''; sheetCtx.errorKind = ''; } } renderAddList(); }
     else if (t.id === 'p-qty') updatePortion();
   });
   document.addEventListener('change', function (ev) {

@@ -1,12 +1,12 @@
 // Mijn Eten service worker
 // - Netwerk eerst (max ~3 s) voor pagina en app-bestanden: updates direct zichtbaar als je online bent.
-// - Cache eerst voor iconen en de (grote) barcode-bibliotheek.
+// - Cache eerst voor iconen, de (grote) barcode-bibliotheek en de NEVO-tabel (data/nevo.json; nieuwe versie = nieuwe CACHE-naam).
 // - Offline: alles komt uit de cache. Externe verzoeken (Supabase, Open Food Facts) worden nooit gecachet.
-const CACHE = 'mijn-eten-v4';
+const CACHE = 'mijn-eten-v5';
 const PREFIX = 'mijn-eten-';
 const NETWORK_TIMEOUT_MS = 3000;
 const CORE = ['./', './app.js', './sync.js', './styles.css', './manifest.webmanifest', './vendor/supabase.js'];
-const STATIC = ['./vendor/zxing.min.js', './icons/apple-touch-icon.png', './icons/icon-192.png', './icons/icon-512.png', './icons/icon-512-maskable.png'];
+const STATIC = ['./data/nevo.json', './vendor/zxing.min.js', './icons/apple-touch-icon.png', './icons/icon-192.png', './icons/icon-512.png', './icons/icon-512-maskable.png'];
 
 self.addEventListener('install', event => {
   event.waitUntil(
@@ -73,7 +73,7 @@ self.addEventListener('fetch', event => {
   const path = url.pathname.slice(scope.pathname.length);
   if (req.mode === 'navigate' || path === '' || path === 'index.html') {
     event.respondWith(networkFirst(req, new URL('./', scope).href));
-  } else if (path.startsWith('icons/') || path === 'vendor/zxing.min.js') {
+  } else if (path.startsWith('icons/') || path.startsWith('data/') || path === 'vendor/zxing.min.js') {
     event.respondWith(cacheFirst(req));
   } else {
     event.respondWith(networkFirst(req, url.origin + url.pathname));
