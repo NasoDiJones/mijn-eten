@@ -2,7 +2,7 @@
 // Vanilla JS PWA. Data staat lokaal (localStorage) en wordt via sync.js met Supabase gesynchroniseerd.
 (function () {
   'use strict';
-  var VERSION = 'v6';
+  var VERSION = 'v7';
   var DATA_KEY = 'mijnEten.data', PENDING_KEY = 'mijnEten.pending', THEME_KEY = 'mijnEten.theme', UI_KEY = 'mijnEten.ui';
   var TABLES = { eten_profiles: 'profiles', eten_diary: 'entries', eten_foods: 'foods', eten_water: 'water', eten_weights: 'weights' };
   var MEALS = [
@@ -186,6 +186,33 @@
   window.setTheme = setTheme;
   if (window.matchMedia) { var mq = matchMedia('(prefers-color-scheme: dark)'); var onMq = function () { if (themePref() === 'auto') applyTheme(true); }; if (mq.addEventListener) mq.addEventListener('change', onMq); else if (mq.addListener) mq.addListener(onMq); }
 
+  // ---------- Deep link (widget): ?actie=toevoegen | snel | scan  of  #toevoegen ----------
+  // Wordt één keer uitgevoerd zodra het dagboek getoond kan worden; daarna uit de adresbalk gehaald.
+  function parseDeep() {
+    try {
+      var u = new URL(location.href), a = (u.searchParams.get('actie') || '').toLowerCase(), h = (u.hash || '').replace(/^#/, '').toLowerCase();
+      if (!a && /^(toevoegen|snel|scan)$/.test(h)) a = h;
+      if (!/^(toevoegen|snel|scan)$/.test(a)) return null;
+      u.searchParams.delete('actie'); if (/^(toevoegen|snel|scan)$/.test(h)) u.hash = '';
+      if (window.history && history.replaceState) history.replaceState(null, '', u.pathname + u.search + u.hash);
+      return a;
+    } catch (e) { return null; }
+  }
+  var deepAction = parseDeep();
+  // Zelfde pagina met alleen een andere #hash (bijv. al open in Safari): geen herlaad, dus hier opvangen
+  window.addEventListener('hashchange', function () { var a = parseDeep(); if (a) { deepAction = a; if (sheetCtx) closeSheet(); runDeepAction(); } });
+  function runDeepAction() {
+    if (!deepAction) return false;
+    var p = profile(); if (!(p && p.onboarded)) return false; // na inloggen/onboarding opnieuw geprobeerd
+    var a = deepAction; deepAction = null;
+    curDate = todayKey();
+    if (curView !== 'diary') showView('diary'); else renderDiary();
+    if (a === 'snel') openQuick();
+    else if (a === 'scan') { openAdd(defaultMeal()); openScanner(); }
+    else openAdd(defaultMeal());
+    return true;
+  }
+
   // ---------- Routing / views ----------
   var curDate = todayKey();
   var curView = null;
@@ -208,12 +235,13 @@
   }
   function route() {
     var p = profile();
-    if (p && p.onboarded) { if (redoing && curView === 'onboarding') return; if (!curView || curView === 'welcome' || curView === 'onboarding') showView(ui.tab || 'diary'); else renderView(curView); return; }
+    if (p && p.onboarded) { if (redoing && curView === 'onboarding') return; if (deepAction && runDeepAction()) return; if (!curView || curView === 'welcome' || curView === 'onboarding') showView(ui.tab || 'diary'); else renderView(curView); return; }
     if (loggedIn() || ui.localChosen) { if (curView !== 'onboarding') { ob = null; showView('onboarding'); } return; }
     showView('welcome');
   }
   function rerender() {
     if (!curView) return route();
+    if (deepAction && runDeepAction()) return;
     var p = profile();
     if ((curView === 'welcome' || curView === 'onboarding') && p && p.onboarded && !redoing) return route();
     if (curView === 'welcome' && loggedIn()) return route();
@@ -480,6 +508,7 @@
       '<button data-theme-opt="light" data-action="theme" data-v="light" aria-pressed="' + (pref === 'light') + '">Licht</button>' +
       '<button data-theme-opt="dark" data-action="theme" data-v="dark" aria-pressed="' + (pref === 'dark') + '">Donker</button></div>' +
       '<p class="tiny muted">Automatisch volgt de instelling van je iPhone.</p></div>';
+    html += '<div class="card" id="widget-card">' + widgetHtml() + '</div>';
     html += '<div class="card"><div class="card-title"><h3>📷 Foto herkennen</h3><span class="flag">binnenkort</span></div><p class="small muted" style="margin:0">Een foto van je bord maken en de app laten herkennen wat erop ligt, komt later. Daarvoor is een AI-dienst nodig die een paar cent per foto kost.</p></div>';
     html += '<div class="card"><div class="card-title"><h3>Gegevens</h3></div><button class="btn block" data-action="redo-onboarding">Doel opnieuw berekenen (stappen)</button><button class="btn block" data-action="export">Exporteer mijn gegevens (JSON)</button></div>';
     if (loggedIn() && window.meSync && window.meSync.backupsHtml) html += '<div class="card" id="backups-card">' + window.meSync.backupsHtml() + '</div>';
@@ -488,7 +517,49 @@
     $('view-profile').innerHTML = html;
     if (window.meSync && window.meSync.paintStatus) window.meSync.paintStatus();
     if (window.meSync && window.meSync.refreshBackups && loggedIn()) window.meSync.refreshBackups();
+    loadWidgetSrc().catch(function () {});
   }
+  // ---------- Widget (Scriptable) ----------
+  var WIDGET_PATH = 'widget/mijn-eten-widget.js', widgetSrc = null, widgetLoading = null;
+  function loadWidgetSrc() {
+    if (widgetSrc) return Promise.resolve(widgetSrc);
+    if (!widgetLoading) widgetLoading = fetch(WIDGET_PATH, { cache: 'no-cache' }).then(function (r) { if (!r.ok) throw new Error('HTTP ' + r.status); return r.text(); })
+      .then(function (t) { widgetSrc = t; return t; }).catch(function (e) { widgetLoading = null; throw e; });
+    return widgetLoading;
+  }
+  function widgetHtml() {
+    return '<div class="card-title"><h3>📱 Widget</h3></div>' +
+      '<p class="small muted" style="margin:0 0 8px">Zet je calorieën van vandaag op je beginscherm: gegeten, doel en hoeveel je nog over hebt. Werkt met de gratis app <b>Scriptable</b>. Iedereen logt in met zijn eigen account en ziet alleen zijn eigen gegevens.</p>' +
+      '<ol class="small widget-steps">' +
+      '<li>Installeer <a href="https://apps.apple.com/app/scriptable/id1405459188" target="_blank" rel="noopener">Scriptable</a> uit de App Store.</li>' +
+      '<li>Tik hieronder op <b>Script kopiëren</b>.</li>' +
+      '<li>Open Scriptable, tik rechtsboven op <b>+</b>, houd je vinger in het lege veld en kies <b>Plak</b>. Tik bovenaan op de naam, noem het <b>Mijn Eten</b> en tik op <b>Gereed</b>.</li>' +
+      '<li>Tik één keer op het script en log in met je Mijn Eten-e-mail en wachtwoord (je wachtwoord wordt niet bewaard).</li>' +
+      '<li>Houd je beginscherm ingedrukt → <b>Wijzig</b> → <b>Voeg widget toe</b> → <b>Scriptable</b> → kies klein of middel → <b>Voeg widget toe</b>.</li>' +
+      '<li>Houd de widget ingedrukt → <b>Wijzig widget</b> → bij <b>Script</b> kies je <b>Mijn Eten</b>. "Bij interactie" mag blijven staan.</li></ol>' +
+      '<div class="row mt"><button class="btn primary sm grow" data-action="widget-copy">Script kopiëren</button><a class="btn sm grow" id="widget-open" href="' + WIDGET_PATH + '" target="_blank" rel="noopener">Script bekijken</a></div>' +
+      '<p class="tiny muted" id="widget-msg" style="margin:8px 0 0">Tikken op de widget opent Mijn Eten in Safari (iPhone laat een widget niet de beginscherm-app openen). Log daar één keer in. <b>⚡ Snel kcal</b> op de middelgrote widget voegt calorieën toe zonder de app te openen.</p>';
+  }
+  function copyText(text) {
+    if (navigator.clipboard && navigator.clipboard.writeText) return navigator.clipboard.writeText(text);
+    return Promise.reject(new Error('geen klembord'));
+  }
+  function copyWidget() {
+    var done = function () { toast('Script gekopieerd ✓ Plak het in Scriptable'); };
+    var fail = function () { toast('Kopiëren lukte niet. Tik op "Script bekijken" en kopieer de tekst.'); };
+    if (widgetSrc) { copyText(widgetSrc).then(done, fail); return; }
+    // Safari: klembord alleen binnen de tik; een ClipboardItem met een belofte mag wél
+    if (window.ClipboardItem && navigator.clipboard && navigator.clipboard.write) {
+      try {
+        var item = new ClipboardItem({ 'text/plain': loadWidgetSrc().then(function (t) { return new Blob([t], { type: 'text/plain' }); }) });
+        navigator.clipboard.write([item]).then(done, function () { loadWidgetSrc().then(copyText).then(done, fail); });
+        return;
+      } catch (e) {}
+    }
+    loadWidgetSrc().then(copyText).then(done, fail);
+  }
+  window.__meWidget = { copy: copyWidget, load: loadWidgetSrc, deep: function () { return deepAction; } };
+
   function targetInput(k, label, unit, t, m) {
     return '<label class="field"><span>' + label + '</span><div class="unit-input"><input data-target="' + k + '" inputmode="numeric" value="' + (m[k] > 0 ? m[k] : '') + '" placeholder="' + fmt(t[k]) + '"><em>' + unit + '</em></div></label>';
   }
@@ -1316,6 +1387,7 @@
     'theme': function (el) { setTheme(el.getAttribute('data-v')); },
     'export': function () { exportData(); },
     'redo-onboarding': function () { redoing = true; ob = null; showView('onboarding'); },
+    'widget-copy': function () { copyWidget(); },
     'sync-now': function () { if (window.meSync) window.meSync.syncNow(true); },
     'logout': function () { if (window.meSync) window.meSync.logout(); }
   };

@@ -252,3 +252,6 @@ input:focus, select:focus { border-color: var(--brand); box-shadow: 0 0 0 3px co
 .stepper .btn { width: 40px; height: 40px; padding: 0; font-size: 20px; line-height: 1; }
 .stepper input { width: 64px; height: 40px; text-align: center; font-size: 17px; font-weight: 700; }
 .count-total { margin: 0 0 12px; min-height: 16px; text-align: right; }
+.widget-steps { margin: 0 0 4px; padding-left: 20px; line-height: 1.45; }
+.widget-steps li { margin-bottom: 4px; }
+a.btn { text-decoration: none; display: inline-flex; align-items: center; justify-content: center; }
