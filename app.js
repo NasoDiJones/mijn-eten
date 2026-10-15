@@ -2,7 +2,7 @@
 // Vanilla JS PWA. Data staat lokaal (localStorage) en wordt via sync.js met Supabase gesynchroniseerd.
 (function () {
   'use strict';
-  var VERSION = 'v5';
+  var VERSION = 'v6';
   var DATA_KEY = 'mijnEten.data', PENDING_KEY = 'mijnEten.pending', THEME_KEY = 'mijnEten.theme', UI_KEY = 'mijnEten.ui';
   var TABLES = { eten_profiles: 'profiles', eten_diary: 'entries', eten_foods: 'foods', eten_water: 'water', eten_weights: 'weights' };
   var MEALS = [
@@ -326,8 +326,18 @@
   }
   function amountLabel(e) {
     if (e.quick) return 'Snel toegevoegd';
+    if (e.count > 0 && e.count !== 1 && e.unitQty > 0) return portionText(e.unit === 'serving' && e.servingG ? 'serving' : 'g', e.unitQty, e.count, { label: e.servingLabel }, e.grams, false);
     if (e.unit === 'serving' && e.servingG) return fmt(e.qty, 2) + ' × ' + (e.servingLabel || 'portie') + ' (' + fmt(e.grams) + ' g)';
     return fmt(e.grams) + ' g';
+  }
+  // "3 × 35 g (105 g)" / "3 × snee (105 g)" / "2 × 1,5 stuk (150 g)"
+  function portionText(unit, uq, count, serving, grams, ml, eq) {
+    var u = ml ? ' ml' : ' g', one;
+    if (!(uq > 0) || !(count > 0)) return '';
+    if (unit === 'serving') one = (uq !== 1 ? fmt(uq, 2) + ' ' : '') + ((serving && serving.label) || 'portie');
+    else one = fmt(uq, 1) + u;
+    if (count === 1) return eq ? (unit === 'serving' ? one + ' = ' + fmt(grams) + u : '') : one;
+    return fmt(count, 2) + ' × ' + one + (eq ? ' = ' : ' (') + fmt(grams) + u + (eq ? '' : ')');
   }
   function setWater(ml) {
     ml = Math.max(0, Math.round(ml));
@@ -541,7 +551,7 @@
       .sort(function (a, b) { return (b.useCount || 0) - (a.useCount || 0); }).slice(0, 15);
   }
   function foodIdOf(f) { return f.id && !/^tmp:/.test(f.id) ? f.id : (f.code ? 'off-' + f.code : null); }
-  function rememberFood(f, used) {
+  function rememberFood(f, used, lastPortion) {
     var id = foodIdOf(f) || ('own-' + uid());
     var cur = getLive('foods', id) || {};
     var data = {
@@ -549,6 +559,7 @@
       per100: f.per100, serving: f.serving || null, favorite: f.favorite != null ? !!f.favorite : !!cur.favorite,
       useCount: (cur.useCount || 0) + (used ? 1 : 0), lastUsed: used ? new Date().toISOString() : (cur.lastUsed || '')
     };
+    if (lastPortion) data.lastPortion = lastPortion; else if (cur.lastPortion) data.lastPortion = cur.lastPortion;
     if (data.source === 'nevo') { data.syn = f.syn != null ? f.syn : (cur.syn || ''); data.group = f.group || cur.group || ''; data.ml = f.ml != null ? !!f.ml : !!cur.ml; data.servingEst = !!(f.serving && (f.servingEst != null ? f.servingEst : cur.servingEst)); }
     put('eten_foods', id, data);
     return Object.assign({ id: id }, data);
@@ -893,12 +904,29 @@
     opts = opts || {};
     var prev = sheetCtx && sheetCtx.type === 'add' ? sheetCtx : null;
     var e = opts.entry;
-    var unit = e ? (e.unit === 'serving' && food.serving ? 'serving' : 'g') : (food.serving ? 'serving' : 'g');
-    var qty = e ? (unit === 'serving' ? e.qty : e.grams) : (food.serving ? 1 : 100);
-    sheetCtx = { type: 'portion', food: food, entry: e || null, meal: e ? e.meal : (opts.meal || (prev && prev.meal) || defaultMeal()), date: e ? e.date : curDate, unit: unit, qty: qty, back: prev };
+    var unit, qty, count = 1;
+    if (e) {
+      // Oude regels (zonder count) = 1 × de hele hoeveelheid; nieuwe: count × unitQty (qty/grams blijven totalen)
+      count = e.count > 0 ? e.count : 1;
+      unit = e.unit === 'serving' && food.serving ? 'serving' : 'g';
+      if (e.count > 0 && e.unitQty > 0 && (unit === 'serving') === (e.unit === 'serving')) qty = e.unitQty;
+      else { qty = unit === 'serving' ? e.qty : e.grams; count = 1; }
+    } else {
+      var fid0 = foodIdOf(food), sv0 = fid0 ? getLive('foods', fid0) : null, lp = sv0 && sv0.lastPortion;
+      unit = food.serving ? 'serving' : 'g'; qty = food.serving ? 1 : 100;
+      if (lp && lp.qty > 0) {
+        if (lp.unit === 'serving' && food.serving) { unit = 'serving'; qty = lp.qty; }
+        else if (lp.unit === 'g' && lp.qty > 0) { unit = 'g'; qty = lp.qty; }
+        else if (lp.unitGrams > 0) { unit = 'g'; qty = lp.unitGrams; }
+        count = lp.count > 0 ? lp.count : 1;
+      }
+    }
+    sheetCtx = { type: 'portion', food: food, entry: e || null, meal: e ? e.meal : (opts.meal || (prev && prev.meal) || defaultMeal()), date: e ? e.date : curDate, unit: unit, qty: qty, count: count, back: prev };
     renderPortion();
   }
-  function portionGrams() { var c = sheetCtx, q = num($('p-qty') ? $('p-qty').value : c.qty); if (!isFinite(q)) q = 0; return c.unit === 'serving' && c.food.serving ? q * c.food.serving.grams : q; }
+  function portionCount() { var c = sheetCtx, n = num($('p-count') ? $('p-count').value : c.count); return isFinite(n) && n > 0 ? Math.min(99, Math.round(n * 100) / 100) : 0; }
+  function portionUnitGrams() { var c = sheetCtx, q = num($('p-qty') ? $('p-qty').value : c.qty); if (!isFinite(q)) q = 0; return c.unit === 'serving' && c.food.serving ? q * c.food.serving.grams : q; }
+  function portionGrams() { return portionUnitGrams() * portionCount(); }
   function renderPortion() {
     var c = sheetCtx, f = c.food, fid = foodIdOf(f), saved = fid ? getLive('foods', fid) : null;
     var fav = saved ? !!saved.favorite : !!f.favorite;
@@ -910,7 +938,10 @@
     html += '<div class="grid2"><label class="field"><span>Hoeveelheid</span><input id="p-qty" inputmode="decimal" value="' + esc(String(r1(c.qty)).replace('.', ',')) + '"></label>' +
       '<label class="field"><span>Eenheid</span><select id="p-unit"><option value="g"' + (c.unit === 'g' ? ' selected' : '') + '>' + (f.ml ? 'ml' : 'gram') + '</option>' +
       (f.serving ? '<option value="serving"' + (c.unit === 'serving' ? ' selected' : '') + '>' + esc(f.serving.label || 'portie') + ' (' + fmt(f.serving.grams) + (f.ml ? ' ml' : ' g') + ')</option>' : '') + '</select></label></div>';
-    html += '<div class="row wrap" style="gap:6px;margin:-4px 0 12px">' + (c.unit === 'g' ? [50, 100, 150, 200, 250] : [0.5, 1, 1.5, 2, 3]).map(function (v) { return '<button class="btn sm" data-action="p-quick" data-v="' + v + '">' + fmt(v, 1) + (c.unit === 'g' ? ' g' : '×') + '</button>'; }).join('') + '</div>';
+    if (c.unit === 'g') html += '<div class="row wrap" style="gap:6px;margin:-4px 0 12px">' + [50, 100, 150, 200, 250].map(function (v) { return '<button class="btn sm" data-action="p-quick" data-v="' + v + '">' + v + (f.ml ? ' ml' : ' g') + '</button>'; }).join('') + '</div>';
+    html += '<div class="count-row"><span class="count-label">Aantal</span><div class="stepper"><button type="button" class="btn sm" data-action="p-count" data-d="-0.5" aria-label="Aantal min een half">−</button>' +
+      '<input id="p-count" inputmode="decimal" aria-label="Aantal" value="' + esc(String(c.count || 1).replace('.', ',')) + '"><button type="button" class="btn sm" data-action="p-count" data-d="0.5" aria-label="Aantal plus een half">+</button></div></div>' +
+      '<div class="tiny muted count-total" id="p-total"></div>';
     html += '<label class="field"><span>Maaltijd</span><select id="p-meal">' + MEALS.map(function (m) { return '<option value="' + m.id + '"' + (c.meal === m.id ? ' selected' : '') + '>' + m.name + '</option>'; }).join('') + '</select></label>';
     html += '<div class="tiny muted">Per 100 ' + (f.ml ? 'ml' : 'g') + ': ' + fmt(f.per100.kcal) + ' kcal · eiwit ' + fmt(f.per100.protein, 1) + ' g · koolh. ' + fmt(f.per100.carbs, 1) + ' g · vet ' + fmt(f.per100.fat, 1) + ' g</div>';
     if (f.source === 'nevo') html += '<div class="tiny muted" id="nevo-src" style="margin-top:4px">Bron: ' + esc(NEVO_SRC) + (f.servingEst ? '. Portiegrootte is een schatting van Mijn Eten (geen NEVO-gegeven).' : '.') + '</div>';
@@ -923,19 +954,22 @@
   function updatePortion() {
     var c = sheetCtx; if (!c || c.type !== 'portion') return;
     var n = nutr(c.food.per100, portionGrams());
+    if ($('p-total')) $('p-total').textContent = portionText(c.unit, num($('p-qty').value), portionCount(), c.food.serving, portionGrams(), c.food.ml, true);
     $('p-nutri').innerHTML = '<div><b id="p-kcal">' + fmt(n.kcal) + '</b><span>kcal</span></div><div><b>' + fmt(n.protein, 1) + '</b><span><i class="dot" style="background:var(--protein)"></i>eiwit</span></div>' +
       '<div><b>' + fmt(n.carbs, 1) + '</b><span><i class="dot" style="background:var(--carbs)"></i>koolh.</span></div><div><b>' + fmt(n.fat, 1) + '</b><span><i class="dot" style="background:var(--fat)"></i>vet</span></div>';
   }
   function savePortion() {
-    var c = sheetCtx, f = c.food, grams = portionGrams();
+    var c = sheetCtx, f = c.food, cnt = portionCount(), grams = portionGrams();
+    if (!(cnt > 0)) { toast('Vul een geldig aantal in'); return; }
     if (!(grams > 0)) { toast('Vul een hoeveelheid in'); return; }
     c.meal = $('p-meal').value;
-    var saved = f.source === 'photo' ? { id: null } : rememberFood(f, !c.entry);
-    var n = nutr(f.per100, grams), q = num($('p-qty').value);
+    var uq = num($('p-qty').value), ug = portionUnitGrams();
+    var saved = f.source === 'photo' ? { id: null } : rememberFood(f, !c.entry, { unit: c.unit, qty: r1(uq), count: cnt, unitGrams: r1(ug) });
+    var n = nutr(f.per100, grams), q = r1(uq * cnt);
     var id = c.entry ? c.entry.id : uid();
     put('eten_diary', id, {
       date: c.date, meal: c.meal, name: f.name, brand: f.brand || '', foodId: saved.id, barcode: f.barcode || '',
-      grams: r1(grams), qty: r1(q), unit: c.unit, servingG: f.serving ? f.serving.grams : null, servingLabel: f.serving ? f.serving.label : '',
+      grams: r1(grams), qty: q, count: cnt, unitQty: r1(uq), unitGrams: r1(ug), unit: c.unit, servingG: f.serving ? f.serving.grams : null, servingLabel: f.serving ? f.serving.label : '',
       per100: f.per100, kcal: r1(n.kcal), protein: r1(n.protein), carbs: r1(n.carbs), fat: r1(n.fat), created: c.entry ? (c.entry.created || '') : new Date().toISOString()
     });
     var wasNew = !c.entry, meal = c.meal;
@@ -958,8 +992,9 @@
       '<div class="grid2"><label class="field"><span>Merk (optioneel)</span><input id="m-brand" value="' + esc(f ? f.brand : '') + '"></label>' +
       '<label class="field"><span>Barcode (optioneel)</span><input id="m-barcode" inputmode="numeric" value="' + esc(f ? f.barcode : (prefill.barcode || '')) + '"></label></div>' +
       '<label class="field"><span>Voedingswaarden op het etiket staan per</span><div class="seg"><button type="button" data-action="m-basis" data-v="100" aria-pressed="true">100 g / ml</button><button type="button" data-action="m-basis" data-v="serving" aria-pressed="false">portie</button></div></label>' +
-      '<div class="grid2"><label class="field"><span>Portiegrootte</span><div class="unit-input"><input id="m-sg" inputmode="decimal" value="' + v(f && f.serving ? f.serving.grams : '') + '" placeholder="optioneel"><em>g</em></div></label>' +
-      '<label class="field"><span>Naam portie</span><input id="m-sl" value="' + esc(f && f.serving ? f.serving.label : '') + '" placeholder="bijv. 1 snee"></label></div>' +
+      '<div class="grid2"><label class="field"><span>Portiegrootte</span><div class="unit-input"><input id="m-sg" inputmode="decimal" value="' + v(f && f.serving ? f.serving.grams : '') + '" placeholder="bijv. 35"><em>g</em></div></label>' +
+      '<label class="field"><span>Naam portie</span><input id="m-sl" value="' + esc(f && f.serving ? f.serving.label : '') + '" placeholder="bijv. snee"></label></div>' +
+      '<p class="tiny muted" style="margin-top:-4px" id="m-portion-hint">Optioneel: geef een portie op (bijv. snee = 35 g), dan kun je straks kiezen voor bijv. 3 × snee.</p>' +
       '<div class="grid2"><label class="field"><span>Calorieën</span><div class="unit-input"><input id="m-kcal" inputmode="decimal" value="' + v(p.kcal) + '"><em>kcal</em></div></label>' +
       '<label class="field"><span>Eiwit</span><div class="unit-input"><input id="m-protein" inputmode="decimal" value="' + v(p.protein) + '"><em>g</em></div></label>' +
       '<label class="field"><span>Koolhydraten</span><div class="unit-input"><input id="m-carbs" inputmode="decimal" value="' + v(p.carbs) + '"><em>g</em></div></label>' +
@@ -1233,6 +1268,11 @@
     'nevo-more': function () { if (sheetCtx) { sheetCtx.nevoAll = true; renderAddList(); } },
     'pick': function (el) { var f = sheetCtx.list[+el.getAttribute('data-i')]; if (f) openPortion(f); },
     'portion-back': goBack,
+    'p-count': function (el) {
+      var cur = portionCount() || 1, d = +el.getAttribute('data-d');
+      var nx = d > 0 ? Math.floor(cur * 2 + 1e-9) / 2 + 0.5 : Math.ceil(cur * 2 - 1e-9) / 2 - 0.5;
+      nx = Math.max(0.5, Math.min(99, nx)); $('p-count').value = String(nx).replace('.', ','); sheetCtx.count = nx; updatePortion();
+    },
     'p-quick': function (el) { $('p-qty').value = String(el.getAttribute('data-v')).replace('.', ','); updatePortion(); },
     'fav': function (el) {
       var c = sheetCtx, f = c.food, on = el.getAttribute('aria-pressed') !== 'true';
@@ -1296,13 +1336,13 @@
   document.addEventListener('input', function (ev) {
     var t = ev.target;
     if (t.id === 'add-q') { if (sheetCtx) { sheetCtx.q = t.value; sheetCtx.nevoAll = false; if (!t.value.trim()) sheetCtx.results = null; if (!sheetCtx.loading) { sheetCtx.error = ''; sheetCtx.errorKind = ''; } } renderAddList(); }
-    else if (t.id === 'p-qty') updatePortion();
+    else if (t.id === 'p-qty' || t.id === 'p-count') updatePortion();
   });
   document.addEventListener('change', function (ev) {
     var t = ev.target;
     if (t.id === 'date-pick') { if (t.value) { curDate = t.value; renderDiary(); } }
     else if (t.id === 'p-unit') {
-      var c = sheetCtx, g = portionGrams(); c.unit = t.value;
+      var c = sheetCtx, g = portionUnitGrams(); c.count = portionCount() || 1; c.unit = t.value;
       c.qty = c.unit === 'serving' && c.food.serving ? (r1(g / c.food.serving.grams) || 1) : (Math.round(g) || 100);
       c.meal = $('p-meal').value; renderPortion();
     }

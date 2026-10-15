@@ -245,3 +245,10 @@ input:focus, select:focus { border-color: var(--brand); box-shadow: 0 0 0 3px co
 [data-theme="dark"] .flag.nevo { background: #3a2e12; color: #fcd34d; }
 #sources-card a { color: var(--brand); }
 .flag.flag-lead { margin-left: 0; margin-right: 5px; font-size: 10px; }
+/* v6: Aantal-stepper */
+.count-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin: 0 0 6px; }
+.count-label { font-weight: 600; font-size: 14px; color: var(--muted, inherit); }
+.stepper { display: flex; align-items: center; gap: 6px; }
+.stepper .btn { width: 40px; height: 40px; padding: 0; font-size: 20px; line-height: 1; }
+.stepper input { width: 64px; height: 40px; text-align: center; font-size: 17px; font-weight: 700; }
+.count-total { margin: 0 0 12px; min-height: 16px; text-align: right; }
