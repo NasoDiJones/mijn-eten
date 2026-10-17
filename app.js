@@ -2,7 +2,7 @@
 // Vanilla JS PWA. Data staat lokaal (localStorage) en wordt via sync.js met Supabase gesynchroniseerd.
 (function () {
   'use strict';
-  var VERSION = 'v8';
+  var VERSION = 'v9';
   var DATA_KEY = 'mijnEten.data', PENDING_KEY = 'mijnEten.pending', THEME_KEY = 'mijnEten.theme', UI_KEY = 'mijnEten.ui';
   var TABLES = { eten_profiles: 'profiles', eten_diary: 'entries', eten_foods: 'foods', eten_water: 'water', eten_weights: 'weights' };
   var MEALS = [
@@ -28,6 +28,10 @@
   function num(v) { if (v == null || v === '') return NaN; var n = parseFloat(String(v).replace(/\s/g, '').replace(',', '.')); return isFinite(n) ? n : NaN; }
   function fmt(n, dec) { if (!isFinite(n)) return '–'; return Number(n).toLocaleString('nl-NL', { maximumFractionDigits: dec || 0, minimumFractionDigits: 0 }); }
   function r1(n) { return Math.round(n * 10) / 10; }
+  // Suiker ('waarvan suikers', g) is optioneel: null/undefined = onbekend (oude regels, product zonder etiketwaarde).
+  function hasNum(x) { return x != null && x !== '' && isFinite(+x); }
+  function sugarSumTxt(s) { return s.sugar == null ? '–' : fmt(s.sugar) + ' g' + (s.sugarPartial ? '*' : ''); }
+  function sugarTxt(v, dec) { return hasNum(v) ? fmt(v, dec == null ? 1 : dec) + ' g' : '–'; }
   function clamp(n, a, b) { return Math.max(a, Math.min(b, n)); }
   function uid() {
     if (window.crypto && crypto.randomUUID) return crypto.randomUUID();
@@ -162,11 +166,15 @@
   }
   function nutr(per100, grams) {
     var f = (+grams || 0) / 100; per100 = per100 || {};
-    return { kcal: (+per100.kcal || 0) * f, protein: (+per100.protein || 0) * f, carbs: (+per100.carbs || 0) * f, fat: (+per100.fat || 0) * f };
+    return { kcal: (+per100.kcal || 0) * f, protein: (+per100.protein || 0) * f, carbs: (+per100.carbs || 0) * f, fat: (+per100.fat || 0) * f, sugar: hasNum(per100.sugar) ? +per100.sugar * f : null };
   }
   function dayEntries(date) { return liveVals('entries').filter(function (e) { return e.date === date; }).sort(function (a, b) { return (a.created || '') < (b.created || '') ? -1 : 1; }); }
   function sumOf(list) {
-    return list.reduce(function (s, e) { s.kcal += +e.kcal || 0; s.protein += +e.protein || 0; s.carbs += +e.carbs || 0; s.fat += +e.fat || 0; return s; }, { kcal: 0, protein: 0, carbs: 0, fat: 0 });
+    // sugar telt alleen regels met bekende suiker; sugarKnown/n laten zien of het totaal volledig is.
+    var s = list.reduce(function (s, e) { s.kcal += +e.kcal || 0; s.protein += +e.protein || 0; s.carbs += +e.carbs || 0; s.fat += +e.fat || 0; if (hasNum(e.sugar)) { s.sugar += +e.sugar; s.sugarKnown++; } s.n++; return s; }, { kcal: 0, protein: 0, carbs: 0, fat: 0, sugar: 0, sugarKnown: 0, n: 0 });
+    s.sugarPartial = s.sugarKnown > 0 && s.sugarKnown < s.n;
+    if (!s.sugarKnown) s.sugar = null;
+    return s;
   }
   function waterOf(date) { var w = getLive('water', date); return w ? (+w.ml || 0) : 0; }
   function glassSize() { var p = profile() || {}; return +p.glass || 250; }
@@ -332,7 +340,9 @@
       '<div class="sum-stats"><div class="sum-stat"><span class="muted">Doel</span><b>' + fmt(t.kcal) + '</b></div>' +
       '<div class="sum-stat"><span class="muted">Gegeten</span><b id="eaten-kcal">' + fmt(sum.kcal) + '</b></div>' +
       '<div class="sum-stat"><span class="muted">' + (over ? 'Te veel' : 'Over') + '</span><b style="color:' + (over ? 'var(--danger)' : 'var(--brand)') + '">' + fmt(Math.abs(left)) + '</b></div></div></div>' +
-      '<div class="macros">' + macroBar('Eiwit', 'protein', sum.protein, t.protein) + macroBar('Koolhydraten', 'carbs', sum.carbs, t.carbs) + macroBar('Vet', 'fat', sum.fat, t.fat) + '</div></div>';
+      '<div class="macros">' + macroBar('Eiwit', 'protein', sum.protein, t.protein) + macroBar('Koolhydraten', 'carbs', sum.carbs, t.carbs) + macroBar('Vet', 'fat', sum.fat, t.fat) + '</div>' +
+      '<div class="sugar-line" id="sugar-total"><span><i class="dot" style="background:var(--sugar)"></i>Waarvan suikers</span><b>' + sugarSumTxt(sum) + '</b></div>' +
+      (sum.sugarPartial ? '<div class="tiny muted sugar-note">* niet bij elk product is de suiker bekend</div>' : '') + '</div>';
     // Water
     var ml = waterOf(curDate), gs = glassSize(), goalGl = Math.max(1, Math.round(t.water / gs)), full = Math.floor(ml / gs + 1e-6), shown = Math.max(goalGl, full);
     html += '<div class="card" id="water-card"><div class="card-title"><h3>💧 Water</h3><span class="muted small"><b style="color:var(--text)" id="water-l">' + fmt(ml / 1000, 2) + '</b> / ' + fmt(t.water / 1000, 2) + ' L</span></div>' +
@@ -342,12 +352,17 @@
     // Maaltijden
     MEALS.forEach(function (m) {
       var items = list.filter(function (e) { return e.meal === m.id; }), s = sumOf(items);
-      html += '<div class="card meal" data-meal="' + m.id + '"><div class="meal-head"><h3><span>' + m.ico + '</span>' + m.name + '</h3><span class="meal-kcal">' + fmt(s.kcal) + ' kcal</span></div>';
-      if (items.length) html += '<div class="tiny muted" style="margin-top:2px">E ' + fmt(s.protein) + ' g · K ' + fmt(s.carbs) + ' g · V ' + fmt(s.fat) + ' g</div>';
+      html += '<div class="card meal' + (items.length ? '' : ' empty') + '" data-meal="' + m.id + '"><div class="meal-head">' +
+        '<div class="meal-top"><h3><span class="meal-ico">' + m.ico + '</span><span class="meal-name">' + m.name + '</span></h3>' +
+        '<span class="meal-kcal"><b>' + fmt(s.kcal) + '</b> kcal</span></div>';
+      if (items.length) html += '<div class="meal-chips">' +
+        '<span class="chip protein"><i></i>E ' + fmt(s.protein) + ' g</span><span class="chip carbs"><i></i>K ' + fmt(s.carbs) + ' g</span>' +
+        '<span class="chip fat"><i></i>V ' + fmt(s.fat) + ' g</span><span class="chip sugar"><i></i>S ' + sugarSumTxt(s) + '</span></div>';
+      html += '</div><button class="add-row" data-action="open-add" data-meal="' + m.id + '"><span class="plus">+</span>Toevoegen aan ' + m.name.toLowerCase() + '</button>';
       items.forEach(function (e) {
-        html += '<div class="entry" data-action="edit-entry" data-id="' + esc(e.id) + '"><div class="grow"><div class="e-name ellipsis">' + esc(e.name) + '</div><div class="e-sub ellipsis">' + esc(amountLabel(e)) + (e.brand ? ' · ' + esc(e.brand) : '') + '</div></div><div class="e-kcal">' + fmt(e.kcal) + ' kcal</div></div>';
+        html += '<div class="entry" data-action="edit-entry" data-id="' + esc(e.id) + '"><div class="grow"><div class="e-name ellipsis">' + esc(e.name) + '</div><div class="e-sub ellipsis">' + esc(amountLabel(e)) + (e.brand ? ' · ' + esc(e.brand) : '') + (hasNum(e.sugar) ? ' · suiker ' + fmt(e.sugar, 1) + ' g' : '') + '</div></div><div class="e-kcal">' + fmt(e.kcal) + ' kcal</div></div>';
       });
-      html += '<button class="add-row" data-action="open-add" data-meal="' + m.id + '"><span class="plus">+</span>Toevoegen</button></div>';
+      html += '</div>';
     });
     $('view-diary').innerHTML = html;
     if (window.meSync && window.meSync.paintStatus) window.meSync.paintStatus();
@@ -703,7 +718,7 @@
     var saved = getLive('foods', 'nevo-' + r[0]);
     return {
       id: 'nevo-' + r[0], code: '', barcode: '', name: r[1], brand: '', syn: r[2] || '', group: d.groups[r[3]] || '', source: 'nevo', image: '',
-      per100: { kcal: r[4], protein: r[5] || 0, carbs: r[6] || 0, fat: r[7] || 0 }, fiber: r[8], ml: !!r[9],
+      per100: { kcal: r[4], protein: r[5] || 0, carbs: r[6] || 0, fat: r[7] || 0, sugar: hasNum(r[10]) ? r[10] : null }, fiber: r[8], ml: !!r[9],
       serving: p ? { grams: p[1], label: p[0] } : null, servingEst: !!p, favorite: saved ? !!saved.favorite : false
     };
   }
@@ -758,7 +773,7 @@
     return {
       id: 'tmp:' + p.code, code: String(p.code || ''), barcode: String(p.code || ''), name: name, brand: String(brand || '').trim(), source: 'off',
       image: p.image_front_small_url || p.image_small_url || '',
-      per100: { kcal: r1(kcal), protein: r1(num(n.proteins_100g) || 0), carbs: r1(num(n.carbohydrates_100g) || 0), fat: r1(num(n.fat_100g) || 0) },
+      per100: { kcal: r1(kcal), protein: r1(num(n.proteins_100g) || 0), carbs: r1(num(n.carbohydrates_100g) || 0), fat: r1(num(n.fat_100g) || 0), sugar: hasNum(n.sugars_100g) && num(n.sugars_100g) >= 0 ? r1(num(n.sugars_100g)) : null },
       serving: sq > 0 && sq < 2000 ? { grams: sq, label: String(p.serving_size || '').trim() || 'portie' } : null,
       local: countries.indexOf('en:netherlands') >= 0,                                   // in Nederland verkocht
       be: countries.indexOf('en:belgium') >= 0 && countries.indexOf('en:netherlands') < 0  // alleen België (kan via barcode)
@@ -893,7 +908,7 @@
   function foodRow(f, i) {
     var thumb = f.image ? '<img class="thumb" loading="lazy" src="' + esc(f.image) + '" alt="" onerror="this.style.visibility=\'hidden\'">' : '<span class="thumb">' + (f.source === 'custom' ? '✏️' : f.source === 'nevo' ? '🥕' : '🍽️') + '</span>';
     var sub = f.source === 'nevo' ? (f.syn || f.group || 'Basisproduct') : (f.brand || (f.source === 'custom' ? 'Eigen product' : ''));
-    return '<div class="list-item" data-action="pick" data-i="' + i + '">' + thumb + '<div class="grow"><div class="li-name ellipsis">' + esc(f.name) + (f.favorite ? ' <span style="color:#f59e0b">★</span>' : '') + (f.be ? '<span class="flag">BE</span>' : '') + '</div><div class="li-sub ellipsis">' + (f.source === 'nevo' ? '<span class="flag nevo flag-lead">NEVO</span>' : '') + esc(sub) + '</div></div>' +
+    return '<div class="list-item" data-action="pick" data-i="' + i + '">' + thumb + '<div class="grow"><div class="li-name ellipsis">' + esc(f.name) + (f.favorite ? ' <span style="color:#f59e0b">★</span>' : '') + (f.be ? '<span class="flag">BE</span>' : '') + '</div><div class="li-sub ellipsis">' + (f.source === 'nevo' ? '<span class="flag nevo flag-lead">NEVO</span>' : '') + esc(sub) + (f.per100 && hasNum(f.per100.sugar) ? '<span class="li-sugar"> · suiker ' + fmt(f.per100.sugar, 1) + ' g</span>' : '') + '</div></div>' +
       '<div class="li-kcal">' + fmt(foodKcal(f)) + ' kcal<small>per 100 ' + (f.ml ? 'ml' : 'g') + '</small></div></div>';
   }
   function renderAddList() {
@@ -1015,7 +1030,7 @@
       '<input id="p-count" inputmode="decimal" aria-label="Aantal" value="' + esc(String(c.count || 1).replace('.', ',')) + '"><button type="button" class="btn sm" data-action="p-count" data-d="0.5" aria-label="Aantal plus een half">+</button></div></div>' +
       '<div class="tiny muted count-total" id="p-total"></div>';
     html += '<label class="field"><span>Maaltijd</span><select id="p-meal">' + MEALS.map(function (m) { return '<option value="' + m.id + '"' + (c.meal === m.id ? ' selected' : '') + '>' + m.name + '</option>'; }).join('') + '</select></label>';
-    html += '<div class="tiny muted">Per 100 ' + (f.ml ? 'ml' : 'g') + ': ' + fmt(f.per100.kcal) + ' kcal · eiwit ' + fmt(f.per100.protein, 1) + ' g · koolh. ' + fmt(f.per100.carbs, 1) + ' g · vet ' + fmt(f.per100.fat, 1) + ' g</div>';
+    html += '<div class="tiny muted">Per 100 ' + (f.ml ? 'ml' : 'g') + ': ' + fmt(f.per100.kcal) + ' kcal · eiwit ' + fmt(f.per100.protein, 1) + ' g · koolh. ' + fmt(f.per100.carbs, 1) + ' g · vet ' + fmt(f.per100.fat, 1) + ' g · waarvan suikers ' + sugarTxt(f.per100.sugar) + '</div>';
     if (f.source === 'nevo') html += '<div class="tiny muted" id="nevo-src" style="margin-top:4px">Bron: ' + esc(NEVO_SRC) + (f.servingEst ? '. Portiegrootte is een schatting van Mijn Eten (geen NEVO-gegeven).' : '.') + '</div>';
     html += '<button class="btn primary block" data-action="p-save">' + (c.entry ? 'Opslaan' : 'Toevoegen aan ' + esc(mealName(c.meal).toLowerCase())) + '</button>';
     if (c.entry) html += '<button class="btn danger block" data-action="p-delete">Verwijderen</button>';
@@ -1028,7 +1043,8 @@
     var n = nutr(c.food.per100, portionGrams());
     if ($('p-total')) $('p-total').textContent = portionText(c.unit, num($('p-qty').value), portionCount(), c.food.serving, portionGrams(), c.food.ml, true);
     $('p-nutri').innerHTML = '<div><b id="p-kcal">' + fmt(n.kcal) + '</b><span>kcal</span></div><div><b>' + fmt(n.protein, 1) + '</b><span><i class="dot" style="background:var(--protein)"></i>eiwit</span></div>' +
-      '<div><b>' + fmt(n.carbs, 1) + '</b><span><i class="dot" style="background:var(--carbs)"></i>koolh.</span></div><div><b>' + fmt(n.fat, 1) + '</b><span><i class="dot" style="background:var(--fat)"></i>vet</span></div>';
+      '<div><b>' + fmt(n.carbs, 1) + '</b><span><i class="dot" style="background:var(--carbs)"></i>koolh.</span></div><div><b>' + fmt(n.fat, 1) + '</b><span><i class="dot" style="background:var(--fat)"></i>vet</span></div>' +
+      '<div><b id="p-sugar">' + (n.sugar == null ? '–' : fmt(n.sugar, 1)) + '</b><span><i class="dot" style="background:var(--sugar)"></i>suiker</span></div>';
   }
   function savePortion() {
     var c = sheetCtx, f = c.food, cnt = portionCount(), grams = portionGrams();
@@ -1042,7 +1058,7 @@
     put('eten_diary', id, {
       date: c.date, meal: c.meal, name: f.name, brand: f.brand || '', foodId: saved.id, barcode: f.barcode || '',
       grams: r1(grams), qty: q, count: cnt, unitQty: r1(uq), unitGrams: r1(ug), unit: c.unit, servingG: f.serving ? f.serving.grams : null, servingLabel: f.serving ? f.serving.label : '',
-      per100: f.per100, kcal: r1(n.kcal), protein: r1(n.protein), carbs: r1(n.carbs), fat: r1(n.fat), created: c.entry ? (c.entry.created || '') : new Date().toISOString()
+      per100: f.per100, kcal: r1(n.kcal), protein: r1(n.protein), carbs: r1(n.carbs), fat: r1(n.fat), sugar: n.sugar == null ? null : r1(n.sugar), created: c.entry ? (c.entry.created || '') : new Date().toISOString()
     });
     var wasNew = !c.entry, meal = c.meal;
     closeSheet(); if (curView === 'diary') renderDiary();
@@ -1070,7 +1086,8 @@
       '<div class="grid2"><label class="field"><span>Calorieën</span><div class="unit-input"><input id="m-kcal" inputmode="decimal" value="' + v(p.kcal) + '"><em>kcal</em></div></label>' +
       '<label class="field"><span>Eiwit</span><div class="unit-input"><input id="m-protein" inputmode="decimal" value="' + v(p.protein) + '"><em>g</em></div></label>' +
       '<label class="field"><span>Koolhydraten</span><div class="unit-input"><input id="m-carbs" inputmode="decimal" value="' + v(p.carbs) + '"><em>g</em></div></label>' +
-      '<label class="field"><span>Vet</span><div class="unit-input"><input id="m-fat" inputmode="decimal" value="' + v(p.fat) + '"><em>g</em></div></label></div>' +
+      '<label class="field"><span>Vet</span><div class="unit-input"><input id="m-fat" inputmode="decimal" value="' + v(p.fat) + '"><em>g</em></div></label>' +
+      '<label class="field"><span>Waarvan suikers</span><div class="unit-input"><input id="m-sugar" inputmode="decimal" value="' + v(p.sugar) + '" placeholder="optioneel"><em>g</em></div></label></div>' +
       '<p class="tiny muted" style="margin-top:-4px">Geen calorieën bekend? Laat leeg, dan rekenen we ze uit met eiwit × 4 + koolhydraten × 4 + vet × 9.</p>' +
       '<button class="btn primary block" data-action="m-save">' + (f ? 'Opslaan' : 'Opslaan en hoeveelheid kiezen') + '</button>' +
       (f ? '<button class="btn danger block" data-action="m-delete">Product verwijderen</button>' : '');
@@ -1079,7 +1096,8 @@
   function saveManual() {
     var c = sheetCtx, name = ($('m-name').value || '').trim();
     if (!name) { toast('Vul een naam in'); $('m-name').focus(); return; }
-    var vals = {}; ['kcal', 'protein', 'carbs', 'fat'].forEach(function (k) { var x = num($('m-' + k).value); vals[k] = isFinite(x) && x >= 0 ? x : null; });
+    var vals = {}; ['kcal', 'protein', 'carbs', 'fat', 'sugar'].forEach(function (k) { var x = num($('m-' + k).value); vals[k] = isFinite(x) && x >= 0 ? x : null; });
+    if (vals.sugar != null && vals.carbs != null && vals.sugar > vals.carbs + 0.05) { toast('Suiker kan niet meer zijn dan koolhydraten'); $('m-sugar').focus(); return; }
     var sg = num($('m-sg').value), sl = ($('m-sl').value || '').trim();
     if (vals.kcal == null) {
       if (vals.protein == null && vals.carbs == null && vals.fat == null) { toast('Vul minimaal de calorieën in'); return; }
@@ -1087,9 +1105,9 @@
     }
     if (c.basis === 'serving') {
       if (!(sg > 0)) { toast('Vul de portiegrootte in grammen in'); $('m-sg').focus(); return; }
-      ['kcal', 'protein', 'carbs', 'fat'].forEach(function (k) { if (vals[k] != null) vals[k] = vals[k] / sg * 100; });
+      ['kcal', 'protein', 'carbs', 'fat', 'sugar'].forEach(function (k) { if (vals[k] != null) vals[k] = vals[k] / sg * 100; });
     }
-    var per100 = { kcal: r1(vals.kcal), protein: r1(vals.protein || 0), carbs: r1(vals.carbs || 0), fat: r1(vals.fat || 0) };
+    var per100 = { kcal: r1(vals.kcal), protein: r1(vals.protein || 0), carbs: r1(vals.carbs || 0), fat: r1(vals.fat || 0), sugar: vals.sugar == null ? null : r1(vals.sugar) };
     var id = c.food && c.food.id ? c.food.id : 'own-' + uid();
     var cur = getLive('foods', id) || {};
     var data = Object.assign({}, cur, { name: name, brand: ($('m-brand').value || '').trim(), barcode: ($('m-barcode').value || '').replace(/\D/g, ''), source: 'custom', per100: per100, serving: sg > 0 ? { grams: r1(sg), label: sl || 'portie' } : null, favorite: !!cur.favorite });
@@ -1109,17 +1127,20 @@
       '<div class="grid2"><label class="field"><span>Calorieën</span><div class="unit-input"><input id="q-kcal" inputmode="decimal" value="' + v(e.kcal) + '"><em>kcal</em></div></label>' +
       '<label class="field"><span>Eiwit</span><div class="unit-input"><input id="q-protein" inputmode="decimal" value="' + v(e.protein) + '"><em>g</em></div></label>' +
       '<label class="field"><span>Koolhydraten</span><div class="unit-input"><input id="q-carbs" inputmode="decimal" value="' + v(e.carbs) + '"><em>g</em></div></label>' +
-      '<label class="field"><span>Vet</span><div class="unit-input"><input id="q-fat" inputmode="decimal" value="' + v(e.fat) + '"><em>g</em></div></label></div>' +
+      '<label class="field"><span>Vet</span><div class="unit-input"><input id="q-fat" inputmode="decimal" value="' + v(e.fat) + '"><em>g</em></div></label>' +
+      '<label class="field"><span>Waarvan suikers</span><div class="unit-input"><input id="q-sugar" inputmode="decimal" value="' + (hasNum(e.sugar) ? String(e.sugar).replace('.', ',') : '') + '" placeholder="optioneel"><em>g</em></div></label></div>' +
       '<label class="field"><span>Maaltijd</span><select id="q-meal">' + MEALS.map(function (m) { return '<option value="' + m.id + '"' + (sheetCtx.meal === m.id ? ' selected' : '') + '>' + m.name + '</option>'; }).join('') + '</select></label>' +
       '<button class="btn primary block" data-action="q-save">' + (entry ? 'Opslaan' : 'Toevoegen') + '</button>' + (entry ? '<button class="btn danger block" data-action="q-delete">Verwijderen</button>' : '');
     openSheet(html, { focus: entry ? null : 'q-kcal' });
   }
   function saveQuick() {
     var c = sheetCtx, kcal = num($('q-kcal').value);
-    var p = num($('q-protein').value), cb = num($('q-carbs').value), f = num($('q-fat').value);
+    var p = num($('q-protein').value), cb = num($('q-carbs').value), f = num($('q-fat').value), sg = num($('q-sugar').value);
+    sg = isFinite(sg) && sg >= 0 ? sg : null;
+    if (sg != null && cb > 0 && sg > cb + 0.05) { toast('Suiker kan niet meer zijn dan koolhydraten'); return; }
     if (!(kcal > 0)) { if (p > 0 || cb > 0 || f > 0) kcal = (p || 0) * 4 + (cb || 0) * 4 + (f || 0) * 9; else { toast('Vul calorieën in'); return; } }
     var id = c.entry ? c.entry.id : uid();
-    put('eten_diary', id, { date: c.date, meal: $('q-meal').value, quick: true, name: ($('q-name').value || '').trim() || 'Snel toegevoegd', kcal: r1(kcal), protein: r1(p || 0), carbs: r1(cb || 0), fat: r1(f || 0), grams: 0, created: c.entry ? c.entry.created : new Date().toISOString() });
+    put('eten_diary', id, { date: c.date, meal: $('q-meal').value, quick: true, name: ($('q-name').value || '').trim() || 'Snel toegevoegd', kcal: r1(kcal), protein: r1(p || 0), carbs: r1(cb || 0), fat: r1(f || 0), sugar: sg == null ? null : r1(sg), grams: 0, created: c.entry ? c.entry.created : new Date().toISOString() });
     closeSheet(); if (curView === 'diary') renderDiary(); toast('Opgeslagen ✓');
   }
 

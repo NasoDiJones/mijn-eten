@@ -2,7 +2,7 @@
 // - Netwerk eerst (max ~3 s) voor pagina en app-bestanden: updates direct zichtbaar als je online bent.
 // - Cache eerst voor iconen, de (grote) barcode-bibliotheek en de NEVO-tabel (data/nevo.json; nieuwe versie = nieuwe CACHE-naam).
 // - Offline: alles komt uit de cache. Externe verzoeken (Supabase, Open Food Facts) worden nooit gecachet.
-const CACHE = 'mijn-eten-v8';
+const CACHE = 'mijn-eten-v9';
 const PREFIX = 'mijn-eten-';
 const NETWORK_TIMEOUT_MS = 3000;
 const CORE = ['./', './app.js', './sync.js', './styles.css', './manifest.webmanifest', './vendor/supabase.js'];
